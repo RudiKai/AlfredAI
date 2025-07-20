@@ -74,6 +74,88 @@ void CalculateMagnetProjection(string zoneName, ENUM_TIMEFRAMES tf)
 //+------------------------------------------------------------------+
 //| Deinitialization                                                |
 //+------------------------------------------------------------------+
+//=== MAGNET HELPERS =================================================
+//+------------------------------------------------------------------+
+//| Projects magnet trendline from strongest zone                    |
+//+------------------------------------------------------------------+
+double ProjectMagnetLine(string &zones[], string label, color clr)
+{
+   double bestMid = EMPTY_VALUE, bestScore = -1e12;
+   for(int i = 0; i < ArraySize(zones); i++)
+   {
+      string z = zones[i];
+      if(ObjectFind(0, z) < 0) continue;
+      double p1 = ObjectGetDouble(0, z, OBJPROP_PRICE, 0);
+      double p2 = ObjectGetDouble(0, z, OBJPROP_PRICE, 1);
+      double mid = (p1 + p2) / 2;
+      double dist  = MathAbs(SymbolInfoDouble(_Symbol, SYMBOL_BID) - mid) / _Point;
+      double width = MathAbs(p1 - p2) / _Point;
+      double score = 1000 - dist - width;
+      if(score > bestScore) { bestScore = score; bestMid = mid; }
+   }
+   if(bestMid == EMPTY_VALUE) return EMPTY_VALUE;
+
+   datetime t1 = TimeCurrent(), t2 = t1 + PeriodSeconds(_Period) * 3;
+   string obj = label + "_Magnet";
+   if(ObjectFind(0, obj) < 0)
+      ObjectCreate(0, obj, OBJ_TREND, 0, t1, bestMid, t2, bestMid);
+   else
+   {
+      ObjectMove(0, obj, 0, t1, bestMid);
+      ObjectMove(0, obj, 1, t2, bestMid);
+   }
+   ObjectSetInteger(0, obj, OBJPROP_COLOR, clr);
+   ObjectSetInteger(0, obj, OBJPROP_WIDTH, 2);
+   ObjectSetInteger(0, obj, OBJPROP_STYLE, STYLE_DASHDOT);
+   ObjectSetInteger(0, obj, OBJPROP_BACK, true);
+
+   return bestMid;
+}
+
+//+------------------------------------------------------------------+
+//| Displays ETA & impulse bias in a corner label                    |
+//+------------------------------------------------------------------+
+void ShowMagnetLabel(string id, double midPrice)
+{
+   if(midPrice == EMPTY_VALUE) return;
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   int eta = (int)(MathAbs(bid - midPrice) / _Point / 5.0);
+
+   double o1 = iOpen(_Symbol, _Period, 1), c1 = iClose(_Symbol, _Period, 1);
+   double o2 = iOpen(_Symbol, _Period, 2), c2 = iClose(_Symbol, _Period, 2);
+   double impulse = MathAbs(c1 - o1) + MathAbs(c2 - o2);
+   string bias = impulse > 2 * _Point ? "🔼 Strong" :
+                 impulse >     _Point ? "➖ Mild"   : "🔽 Weak";
+
+   string nm = id + "_HUD";
+   if(ObjectFind(0, nm) < 0)
+      ObjectCreate(0, nm, OBJ_LABEL, 0, 0, 0);
+   ObjectSetInteger(0, nm, OBJPROP_CORNER, CORNER_RIGHT_LOWER);
+   ObjectSetInteger(0, nm, OBJPROP_XDISTANCE, id == "Demand" ? 20 : 160);
+   ObjectSetInteger(0, nm, OBJPROP_YDISTANCE, 20);
+   ObjectSetInteger(0, nm, OBJPROP_FONTSIZE, 9);
+   ObjectSetInteger(0, nm, OBJPROP_COLOR, clrWhite);
+   ObjectSetString(0, nm, OBJPROP_TEXT,
+      "🧲 " + id + " Magnet\nETA: ~" + IntegerToString(eta) +
+      " min\nImpulse: " + bias);
+}
+
+//+------------------------------------------------------------------+
+//| Main magnet drawing logic                                        |
+//+------------------------------------------------------------------+
+void DrawMagnetLine()
+{
+   if(!EnableMagnetForecast) return;
+
+   string dZones[] = {"DZone_LTF", "DZone_H1", "DZone_H4", "DZone_D1"};
+   string sZones[] = {"SZone_LTF", "SZone_H1", "SZone_H4", "SZone_D1"};
+
+   double dMid = ProjectMagnetLine(dZones, "Demand", clrLime);
+   double sMid = ProjectMagnetLine(sZones, "Supply", clrTomato);
+
+   ShowMagnetLabel("Demand", dMid);
+   ShowMagnetLabel("Supply", sMid);
+}
 void OnDeinit(const int reason)
 {
    EventKillTimer();
@@ -381,7 +463,7 @@ int OnCalculate(const int rates_total,
    CalculateMagnetProjection("SZone_H4", PERIOD_H4);
    LabelMagnetInfo("Demand", SymbolInfoDouble(_Symbol, SYMBOL_BID));
 LabelMagnetInfo("Supply", SymbolInfoDouble(_Symbol, SYMBOL_BID));
-
+DrawMagnetLine();
    return rates_total;
 }
 //+------------------------------------------------------------------+
