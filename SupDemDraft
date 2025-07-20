@@ -147,11 +147,11 @@ void DrawMagnetLine()
 {
    if(!EnableMagnetForecast) return;
 
-   string dZones[] = {"DZone_LTF", "DZone_H1", "DZone_H4", "DZone_D1"};
-   string sZones[] = {"SZone_LTF", "SZone_H1", "SZone_H4", "SZone_D1"};
+string dZones[] = {"DZone_LTF", "DZone_H1", "DZone_H4", "DZone_D1"};
+string sZones[] = {"SZone_LTF", "SZone_H1", "SZone_H4", "SZone_D1"};
 
-   double dMid = ProjectMagnetLine(dZones, "Demand", clrLime);
-   double sMid = ProjectMagnetLine(sZones, "Supply", clrTomato);
+double dMid = ProjectMagnetLine(dZones, "Demand", clrLime);
+double sMid = ProjectMagnetLine(sZones, "Supply", clrTomato);
 
    ShowMagnetLabel("Demand", dMid);
    ShowMagnetLabel("Supply", sMid);
@@ -436,6 +436,11 @@ int OnCalculate(const int rates_total,
    LabelMagnetInfo("Demand", SymbolInfoDouble(_Symbol, SYMBOL_BID));
 LabelMagnetInfo("Supply", SymbolInfoDouble(_Symbol, SYMBOL_BID));
 DrawMagnetLine();
+string dZones[] = {"DZone_LTF", "DZone_H1", "DZone_H4", "DZone_D1"};
+string sZones[] = {"SZone_LTF", "SZone_H1", "SZone_H4", "SZone_D1"};
+
+double dMid = ProjectMagnetLine(dZones, "Demand", clrLime);
+double sMid = ProjectMagnetLine(sZones, "Supply", clrTomato);
    return rates_total;
 }
 //+------------------------------------------------------------------+
