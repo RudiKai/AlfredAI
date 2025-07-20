@@ -334,34 +334,6 @@ int GetTFSeconds(ENUM_TIMEFRAMES tf)
 //+------------------------------------------------------------------+
 //| Draw the floating “magnet” forecast line                        |
 //+------------------------------------------------------------------+
-void DrawMagnetLine()
-
-{
-   if(!EnableMagnetForecast) return;
-
-   double dMid = GetZoneMidpoint("Demand");
-   double sMid = GetZoneMidpoint("Supply");
-   if(dMid==EMPTY_VALUE || sMid==EMPTY_VALUE) return;
-
-   double gravityPrice = (dMid + sMid) * 0.5;
-
-   datetime t1 = iTime(_Symbol, _Period, 1);
-   datetime t2 = iTime(_Symbol, _Period, 4);
-   string   nm = "MagnetLine";
-
-   if(ObjectFind(0,nm) < 0)
-      ObjectCreate(0,nm,OBJ_TREND,0,t1,gravityPrice,t2,gravityPrice);
-   else
-   {
-      ObjectMove(0,nm,0,t1,gravityPrice);
-      ObjectMove(0,nm,1,t2,gravityPrice);
-   }
-
-   ObjectSetInteger(0,nm,OBJPROP_COLOR, clrGold);
-   ObjectSetInteger(0,nm,OBJPROP_WIDTH, 2);
-   ObjectSetInteger(0,nm,OBJPROP_STYLE, STYLE_DASHDOT);
-   ObjectSetInteger(0,nm,OBJPROP_BACK,  true);
-}
 void LabelMagnetInfo(string magnetName, double midPrice)
 {
    //== Calculate ETA assuming avg bar duration ==
