@@ -156,6 +156,36 @@ double GetTFMagnet(ENUM_TIMEFRAMES tf, string &direction, string &strength, stri
 
    return chosen.midPrice;
 }
+string GetCompassBias(string magnetDirection)
+{
+   // -- MA Slope Analysis --
+   int bars = 5;
+double maPrev = iMA(_Symbol, _Period, 8, 0, MODE_SMA, PRICE_CLOSE);
+double maCurr = iMA(_Symbol, _Period, 8, 0, MODE_SMA, PRICE_CLOSE);
+   double slope = maCurr - maPrev;
+
+   // -- Recent Candle Flow --
+   int upC = 0, downC = 0;
+   for(int i = 1; i <= bars; i++)
+   {
+      double closeNow = iClose(_Symbol, _Period, i);
+      double closePrev = iClose(_Symbol, _Period, i + 1);
+      if(closeNow > closePrev) upC++;
+      if(closeNow < closePrev) downC++;
+   }
+
+   // -- Compass Direction --
+   string biasDir = "→", biasStr = "Neutral";
+   if(slope > 0.0003 || upC >= 4) { biasDir = "↑"; biasStr = "Strong Buy"; }
+   else if(slope < -0.0003 || downC >= 4) { biasDir = "↓"; biasStr = "Strong Sell"; }
+
+   // -- Magnet Alignment Check --
+   bool aligned = ((biasDir == "↑" && magnetDirection == "🟢 Demand") ||
+                   (biasDir == "↓" && magnetDirection == "🔴 Supply"));
+   string alignStr = aligned ? "Aligned with Magnet" : "Diverging from Magnet";
+
+   return "📍 Compass Bias: " + biasDir + " " + biasStr + " [" + alignStr + "]";
+}
 
 //== Init ==
 int OnInit()
