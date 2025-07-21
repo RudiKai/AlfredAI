@@ -1,5 +1,6 @@
 //+------------------------------------------------------------------+
-//|                   SupDemZonesRudi_v4.mq5                         |
+//|                   // --- AlfredSupDemCore™ ---
+//               Structural zone generator for AlfredHUD™            |
 //+------------------------------------------------------------------+
 #property indicator_chart_window
 #property strict
