@@ -219,7 +219,7 @@ int OnCalculate(const int rates_total,
       double magnetPrice = GetTFMagnet(tf, direction, strength, eta);
 
       string display = tfLabel + ": " + direction + " [" + strength + "]  " + eta;
-      string objName = "MagHUD_" + tfLabel;
+      string objName = "AlfredHUD_" + tfLabel;
 
       if(ObjectFind(0,objName)<0)
          ObjectCreate(0,objName,OBJ_LABEL,0,0,0);
@@ -233,7 +233,7 @@ int OnCalculate(const int rates_total,
    }
 
    //== Footer ==
-   string footerObj = "MagHUD_Footer";
+   string footerObj = "AlfredHUD_Footer";
    string footerText = "🧲 AlfredHUD™ → " + _Symbol;
    int footerOffset = DashboardYOffset + ArraySize(TFList) * lineHeight + 6;
 
