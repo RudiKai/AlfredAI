@@ -197,10 +197,13 @@ void OnChartEvent(const int id,
 //+------------------------------------------------------------------+
 void DrawAllZones()
 {
-   DrawZones(_Period,   "LTF", DemandColor_LTF, SupplyColor_LTF, true);
-   DrawZones(PERIOD_H1, "H1",  DemandColor_HTF, SupplyColor_HTF, false);
-   DrawZones(PERIOD_H4, "H4",  DemandColor_HTF, SupplyColor_HTF, false);
-   DrawZones(PERIOD_D1, "D1",  DemandColor_HTF, SupplyColor_HTF, false);
+   DrawZones(_Period,     "LTF", DemandColor_LTF, SupplyColor_LTF, true);
+   DrawZones(PERIOD_M15,  "M15", DemandColor_LTF, SupplyColor_LTF, true);
+   DrawZones(PERIOD_M30,  "M30", DemandColor_LTF, SupplyColor_LTF, true);
+   DrawZones(PERIOD_H1,   "H1",  DemandColor_HTF, SupplyColor_HTF, false);
+   DrawZones(PERIOD_H2,   "H2",  DemandColor_HTF, SupplyColor_HTF, false);
+   DrawZones(PERIOD_H4,   "H4",  DemandColor_HTF, SupplyColor_HTF, false);
+   DrawZones(PERIOD_D1,   "D1",  DemandColor_HTF, SupplyColor_HTF, false);
 }
 
 void DrawZones(ENUM_TIMEFRAMES tf,
