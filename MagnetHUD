@@ -9,10 +9,153 @@ double dummyBuffer[];
 
 //== Config ==
 ENUM_TIMEFRAMES TFList[] = { PERIOD_H4, PERIOD_H2, PERIOD_H1, PERIOD_M30, PERIOD_M15 };
-input bool EnableMagnetDashboard = true;
-input int  DashboardCorner       = CORNER_LEFT_UPPER;
-input int  DashboardXOffset      = 10;
-input int  DashboardYOffset      = 20;
+input bool EnableMagnetDashboard     = true;
+input bool EnableHUDDiagnostics      = false;
+input int  DashboardCorner           = CORNER_LEFT_UPPER;
+input int  DashboardXOffset          = 10;
+input int  DashboardYOffset          = 20;
+
+//== Struct ==
+struct MagnetScore {
+   double total;
+   double proximity;
+   double width;
+   double age;
+   double midPrice;
+};
+
+//== TF Helpers ==
+string TFToString(ENUM_TIMEFRAMES tf)
+{
+   switch(tf)
+   {
+      case PERIOD_M1:  return "M1";
+      case PERIOD_M5:  return "M5";
+      case PERIOD_M15: return "M15";
+      case PERIOD_M30: return "M30";
+      case PERIOD_H1:  return "H1";
+      case PERIOD_H2:  return "H2";
+      case PERIOD_H4:  return "H4";
+      case PERIOD_D1:  return "D1";
+      default:         return "TF";
+   }
+}
+
+int GetTFMinutes(ENUM_TIMEFRAMES tf)
+{
+   switch(tf)
+   {
+      case PERIOD_M1:  return 1;
+      case PERIOD_M5:  return 5;
+      case PERIOD_M15: return 15;
+      case PERIOD_M30: return 30;
+      case PERIOD_H1:  return 60;
+      case PERIOD_H2:  return 120;
+      case PERIOD_H4:  return 240;
+      case PERIOD_D1:  return 1440;
+      default:         return 60;
+   }
+}
+
+//== Velocity Estimation ==
+double GetVelocityPerMinute()
+{
+   int bars = 10;
+   double total = 0;
+   for(int i=1; i<=bars; i++)
+      total += MathAbs(iClose(_Symbol,_Period,i) - iClose(_Symbol,_Period,i+1))/_Point;
+
+   double avg = total / bars;
+   double tfMin = GetTFMinutes(_Period);
+   return avg / tfMin;
+}
+
+//== ETA Estimation ==
+string EstimateETA(double targetPrice)
+{
+   if(targetPrice == EMPTY_VALUE) return "Offline";
+
+   double dist = MathAbs(SymbolInfoDouble(_Symbol, SYMBOL_BID) - targetPrice)/_Point;
+   double velocity = GetVelocityPerMinute();
+   if(velocity < 0.3 || velocity == EMPTY_VALUE) return "Offline";
+
+   double etaMins = dist / velocity;
+   return "~" + IntegerToString((int)MathCeil(etaMins)) + "m";
+}
+
+//== Label Color Mapper ==
+color StrengthColor(string label)
+{
+   if(label=="Very Weak")   return clrGray;
+   if(label=="Weak")        return clrSilver;
+   if(label=="Neutral")     return clrKhaki;
+   if(label=="Strong")      return clrAquamarine;
+   if(label=="Very Strong") return clrLime;
+   return clrWhite;
+}
+
+//== Score Conversion ==
+string ScoreToLabel(double score)
+{
+   if(score <  50) return "Very Weak";
+   if(score < 150) return "Weak";
+   if(score < 250) return "Neutral";
+   if(score < 350) return "Strong";
+   return "Very Strong";
+}
+
+//== Zone Score Builder ==
+MagnetScore GetZoneScore(string objName)
+{
+   MagnetScore score;
+   score.total = -999;
+   score.midPrice = EMPTY_VALUE;
+
+   if(ObjectFind(0, objName) >= 0)
+   {
+      double p1 = ObjectGetDouble(0, objName, OBJPROP_PRICE, 0);
+      double p2 = ObjectGetDouble(0, objName, OBJPROP_PRICE, 1);
+      score.midPrice = (p1 + p2) / 2.0;
+
+      double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+      score.proximity = 1000 - MathAbs(bid - score.midPrice)/_Point;
+      score.width     = 200 - MathAbs(p1 - p2)/_Point;
+
+datetime zoneTime = (datetime)ObjectGetInteger(0, objName, OBJPROP_TIME, 0);
+score.age = (double)(TimeCurrent() - zoneTime);      score.age = MathMax(0.0, score.age / 60); // age in minutes
+
+      double ageFactor = MathMax(1.0, score.age / 60);
+      score.total = score.proximity + score.width - ageFactor;
+   }
+
+   return score;
+}
+
+//== Magnet Summary Function ==
+double GetTFMagnet(ENUM_TIMEFRAMES tf, string &direction, string &strength, string &eta)
+{
+   string tfStr = TFToString(tf);
+   string demandName = "DZone_" + tfStr;
+   string supplyName = "SZone_" + tfStr;
+
+   MagnetScore scoreD = GetZoneScore(demandName);
+   MagnetScore scoreS = GetZoneScore(supplyName);
+
+   bool useDemand = (scoreD.total >= scoreS.total);
+   MagnetScore chosen = useDemand ? scoreD : scoreS;
+
+   direction = useDemand ? "🟢 Demand" : "🔴 Supply";
+   strength  = ScoreToLabel(chosen.total);
+   eta       = EstimateETA(chosen.midPrice);
+
+   if(EnableHUDDiagnostics)
+   {
+      eta += StringFormat(" (Score: %.0f | Prox: %.0f / Width: %.0f / Age: %.0f)", 
+                           chosen.total, chosen.proximity, chosen.width, chosen.age);
+   }
+
+   return chosen.midPrice;
+}
 
 //== Init ==
 int OnInit()
@@ -22,7 +165,7 @@ int OnInit()
    return INIT_SUCCEEDED;
 }
 
-//== Main Logic ==
+//== Main HUD Loop ==
 int OnCalculate(const int rates_total,
                 const int prev_calculated,
                 const datetime &time[],
@@ -75,121 +218,4 @@ int OnCalculate(const int rates_total,
    ObjectSetString(0,footerObj,OBJPROP_TEXT, footerText);
 
    return rates_total;
-}
-double GetTFMagnet(ENUM_TIMEFRAMES tf, string &direction, string &strength, string &eta)
-{
-   string zTF = TFToString(tf);
-   string demandZone = "DZone_" + zTF;
-   string supplyZone = "SZone_" + zTF;
-
-   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   double scoreD = -999, scoreS = -999;
-   double bestD = EMPTY_VALUE, bestS = EMPTY_VALUE;
-
-   if(ObjectFind(0, demandZone) >= 0)
-   {
-      double p1 = ObjectGetDouble(0, demandZone, OBJPROP_PRICE, 0);
-      double p2 = ObjectGetDouble(0, demandZone, OBJPROP_PRICE, 1);
-      double mid = (p1 + p2) / 2.0;
-      double dist = MathAbs(bid - mid);
-      double width = MathAbs(p1 - p2);
-      scoreD = 1000 - dist/_Point - width/_Point;
-      bestD = mid;
-   }
-
-   if(ObjectFind(0, supplyZone) >= 0)
-   {
-      double p1 = ObjectGetDouble(0, supplyZone, OBJPROP_PRICE, 0);
-      double p2 = ObjectGetDouble(0, supplyZone, OBJPROP_PRICE, 1);
-      double mid = (p1 + p2) / 2.0;
-      double dist = MathAbs(bid - mid);
-      double width = MathAbs(p1 - p2);
-      scoreS = 1000 - dist/_Point - width/_Point;
-      bestS = mid;
-   }
-
-   bool useDemand = (scoreD >= scoreS);
-   double chosenMid = useDemand ? bestD : bestS;
-   double chosenScore = useDemand ? scoreD : scoreS;
-
-   direction = useDemand ? "🟢 Demand" : "🔴 Supply";
-   strength = ScoreToLabel(chosenScore);
-   eta = EstimateETA(chosenMid);
-
-   return chosenMid;
-}
-
-string ScoreToLabel(double score)
-{
-   if(score <  50) return "Very Weak";
-   if(score < 150) return "Weak";
-   if(score < 250) return "Neutral";
-   if(score < 350) return "Strong";
-   return "Very Strong";
-}
-
-color StrengthColor(string label)
-{
-   if(label=="Very Weak")   return clrGray;
-   if(label=="Weak")        return clrSilver;
-   if(label=="Neutral")     return clrKhaki;
-   if(label=="Strong")      return clrAquamarine;
-   if(label=="Very Strong") return clrLime;
-   return clrWhite;
-}
-
-string EstimateETA(double targetPrice)
-{
-   if(targetPrice == EMPTY_VALUE) return "Offline";
-
-   double dist = MathAbs(SymbolInfoDouble(_Symbol, SYMBOL_BID) - targetPrice)/_Point;
-   double velocity = GetVelocityPerMinute();
-   if(velocity < 0.3 || velocity == EMPTY_VALUE) return "Offline";
-
-   double etaMins = dist / velocity;
-   return "~" + IntegerToString((int)MathCeil(etaMins)) + "m";
-}
-
-double GetVelocityPerMinute()
-{
-   int bars = 10;
-   double total = 0;
-   for(int i=1; i<=bars; i++)
-      total += MathAbs(iClose(_Symbol,_Period,i) - iClose(_Symbol,_Period,i+1))/_Point;
-
-   double avg = total / bars;
-   double tfMin = GetTFMinutes(_Period);
-   return avg / tfMin;
-}
-
-int GetTFMinutes(ENUM_TIMEFRAMES tf)
-{
-   switch(tf)
-   {
-      case PERIOD_M1:  return 1;
-      case PERIOD_M5:  return 5;
-      case PERIOD_M15: return 15;
-      case PERIOD_M30: return 30;
-      case PERIOD_H1:  return 60;
-      case PERIOD_H2:  return 120;
-      case PERIOD_H4:  return 240;
-      case PERIOD_D1:  return 1440;
-      default:         return 60;
-   }
-}
-
-string TFToString(ENUM_TIMEFRAMES tf)
-{
-   switch(tf)
-   {
-      case PERIOD_M1:  return "M1";
-      case PERIOD_M5:  return "M5";
-      case PERIOD_M15: return "M15";
-      case PERIOD_M30: return "M30";
-      case PERIOD_H1:  return "H1";
-      case PERIOD_H2:  return "H2";
-      case PERIOD_H4:  return "H4";
-      case PERIOD_D1:  return "D1";
-      default:         return "TF";
-   }
 }
