@@ -1,0 +1,195 @@
+#property indicator_chart_window
+#property strict
+#property indicator_buffers 1
+#property indicator_plots   1
+#property indicator_type1   DRAW_NONE
+#property indicator_label1  "MagnetHUD"
+
+double dummyBuffer[];
+
+//== Config ==
+ENUM_TIMEFRAMES TFList[] = { PERIOD_H4, PERIOD_H2, PERIOD_H1, PERIOD_M30, PERIOD_M15 };
+input bool EnableMagnetDashboard = true;
+input int  DashboardCorner       = CORNER_LEFT_UPPER;
+input int  DashboardXOffset      = 10;
+input int  DashboardYOffset      = 20;
+
+//== Init ==
+int OnInit()
+{
+   SetIndexBuffer(0, dummyBuffer, INDICATOR_DATA);
+   ArrayInitialize(dummyBuffer, EMPTY_VALUE);
+   return INIT_SUCCEEDED;
+}
+
+//== Main Logic ==
+int OnCalculate(const int rates_total,
+                const int prev_calculated,
+                const datetime &time[],
+                const double &open[],
+                const double &high[],
+                const double &low[],
+                const double &close[],
+                const long &tick_volume[],
+                const long &volume[],
+                const int &spread[])
+{
+   if(!EnableMagnetDashboard) return rates_total;
+
+   int lineHeight = 16;
+
+   for(int i = 0; i < ArraySize(TFList); i++)
+   {
+      ENUM_TIMEFRAMES tf = TFList[i];
+      string tfLabel = TFToString(tf);
+      string strength, direction, eta;
+      double magnetPrice = GetTFMagnet(tf, direction, strength, eta);
+
+      string display = tfLabel + ": " + direction + " [" + strength + "]  " + eta;
+      string objName = "MagHUD_" + tfLabel;
+
+      if(ObjectFind(0,objName)<0)
+         ObjectCreate(0,objName,OBJ_LABEL,0,0,0);
+
+      ObjectSetInteger(0,objName,OBJPROP_CORNER, DashboardCorner);
+      ObjectSetInteger(0,objName,OBJPROP_XDISTANCE, DashboardXOffset);
+      ObjectSetInteger(0,objName,OBJPROP_YDISTANCE, DashboardYOffset + (i * lineHeight));
+      ObjectSetInteger(0,objName,OBJPROP_FONTSIZE, 10);
+      ObjectSetInteger(0,objName,OBJPROP_COLOR, StrengthColor(strength));
+      ObjectSetString(0,objName,OBJPROP_TEXT, display);
+   }
+
+   //== Footer ==
+   string footerObj = "MagHUD_Footer";
+   string footerText = "🧲 AlfredHUD™ → " + _Symbol;
+   int footerOffset = DashboardYOffset + ArraySize(TFList) * lineHeight + 6;
+
+   if(ObjectFind(0,footerObj)<0)
+      ObjectCreate(0,footerObj,OBJ_LABEL,0,0,0);
+
+   ObjectSetInteger(0,footerObj,OBJPROP_CORNER, DashboardCorner);
+   ObjectSetInteger(0,footerObj,OBJPROP_XDISTANCE, DashboardXOffset);
+   ObjectSetInteger(0,footerObj,OBJPROP_YDISTANCE, footerOffset);
+   ObjectSetInteger(0,footerObj,OBJPROP_FONTSIZE, 10);
+   ObjectSetInteger(0,footerObj,OBJPROP_COLOR, clrDodgerBlue);
+   ObjectSetString(0,footerObj,OBJPROP_TEXT, footerText);
+
+   return rates_total;
+}
+double GetTFMagnet(ENUM_TIMEFRAMES tf, string &direction, string &strength, string &eta)
+{
+   string zTF = TFToString(tf);
+   string demandZone = "DZone_" + zTF;
+   string supplyZone = "SZone_" + zTF;
+
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double scoreD = -999, scoreS = -999;
+   double bestD = EMPTY_VALUE, bestS = EMPTY_VALUE;
+
+   if(ObjectFind(0, demandZone) >= 0)
+   {
+      double p1 = ObjectGetDouble(0, demandZone, OBJPROP_PRICE, 0);
+      double p2 = ObjectGetDouble(0, demandZone, OBJPROP_PRICE, 1);
+      double mid = (p1 + p2) / 2.0;
+      double dist = MathAbs(bid - mid);
+      double width = MathAbs(p1 - p2);
+      scoreD = 1000 - dist/_Point - width/_Point;
+      bestD = mid;
+   }
+
+   if(ObjectFind(0, supplyZone) >= 0)
+   {
+      double p1 = ObjectGetDouble(0, supplyZone, OBJPROP_PRICE, 0);
+      double p2 = ObjectGetDouble(0, supplyZone, OBJPROP_PRICE, 1);
+      double mid = (p1 + p2) / 2.0;
+      double dist = MathAbs(bid - mid);
+      double width = MathAbs(p1 - p2);
+      scoreS = 1000 - dist/_Point - width/_Point;
+      bestS = mid;
+   }
+
+   bool useDemand = (scoreD >= scoreS);
+   double chosenMid = useDemand ? bestD : bestS;
+   double chosenScore = useDemand ? scoreD : scoreS;
+
+   direction = useDemand ? "🟢 Demand" : "🔴 Supply";
+   strength = ScoreToLabel(chosenScore);
+   eta = EstimateETA(chosenMid);
+
+   return chosenMid;
+}
+
+string ScoreToLabel(double score)
+{
+   if(score <  50) return "Very Weak";
+   if(score < 150) return "Weak";
+   if(score < 250) return "Neutral";
+   if(score < 350) return "Strong";
+   return "Very Strong";
+}
+
+color StrengthColor(string label)
+{
+   if(label=="Very Weak")   return clrGray;
+   if(label=="Weak")        return clrSilver;
+   if(label=="Neutral")     return clrKhaki;
+   if(label=="Strong")      return clrAquamarine;
+   if(label=="Very Strong") return clrLime;
+   return clrWhite;
+}
+
+string EstimateETA(double targetPrice)
+{
+   if(targetPrice == EMPTY_VALUE) return "Offline";
+
+   double dist = MathAbs(SymbolInfoDouble(_Symbol, SYMBOL_BID) - targetPrice)/_Point;
+   double velocity = GetVelocityPerMinute();
+   if(velocity < 0.3 || velocity == EMPTY_VALUE) return "Offline";
+
+   double etaMins = dist / velocity;
+   return "~" + IntegerToString((int)MathCeil(etaMins)) + "m";
+}
+
+double GetVelocityPerMinute()
+{
+   int bars = 10;
+   double total = 0;
+   for(int i=1; i<=bars; i++)
+      total += MathAbs(iClose(_Symbol,_Period,i) - iClose(_Symbol,_Period,i+1))/_Point;
+
+   double avg = total / bars;
+   double tfMin = GetTFMinutes(_Period);
+   return avg / tfMin;
+}
+
+int GetTFMinutes(ENUM_TIMEFRAMES tf)
+{
+   switch(tf)
+   {
+      case PERIOD_M1:  return 1;
+      case PERIOD_M5:  return 5;
+      case PERIOD_M15: return 15;
+      case PERIOD_M30: return 30;
+      case PERIOD_H1:  return 60;
+      case PERIOD_H2:  return 120;
+      case PERIOD_H4:  return 240;
+      case PERIOD_D1:  return 1440;
+      default:         return 60;
+   }
+}
+
+string TFToString(ENUM_TIMEFRAMES tf)
+{
+   switch(tf)
+   {
+      case PERIOD_M1:  return "M1";
+      case PERIOD_M5:  return "M5";
+      case PERIOD_M15: return "M15";
+      case PERIOD_M30: return "M30";
+      case PERIOD_H1:  return "H1";
+      case PERIOD_H2:  return "H2";
+      case PERIOD_H4:  return "H4";
+      case PERIOD_D1:  return "D1";
+      default:         return "TF";
+   }
+}
