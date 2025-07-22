@@ -1,0 +1,244 @@
+#property indicator_chart_window
+#property strict
+#property indicator_buffers 1
+#property indicator_plots   1
+#property indicator_type1   DRAW_NONE
+#property indicator_label1  "AlfredAI_Pane"
+
+double dummyBuffer[];
+
+input bool EnableAIPane          = true;
+input int  AIPaneCorner          = CORNER_RIGHT_UPPER;
+input int  AIPaneXOffset         = 20;
+input int  AIPaneYOffset         = 20;
+input int  AIPaneFontSize        = 11;
+input bool ShowZoneWarning       = true;
+
+string lastFinalSignal = "Neutral";
+
+int OnInit()
+{
+   SetIndexBuffer(0, dummyBuffer, INDICATOR_DATA);
+   ArrayInitialize(dummyBuffer, EMPTY_VALUE);
+   return INIT_SUCCEEDED;
+}
+
+int OnCalculate(const int rates_total,
+                const int prev_calculated,
+                const datetime &time[],
+                const double &open[],
+                const double &high[],
+                const double &low[],
+                const double &close[],
+                const long &tick_volume[],
+                const long &volume[],
+                const int &spread[])
+
+{
+   if(!EnableAIPane) return rates_total;
+
+   ENUM_TIMEFRAMES tfList[] = { PERIOD_M15, PERIOD_M30, PERIOD_H1, PERIOD_H2, PERIOD_H4 };
+   string tfNames[] = { "M15", "M30", "H1", "H2", "H4" };
+
+   int buy=0, sell=0;
+   string biasLines = "";
+
+   for(int i=0; i<ArraySize(tfList); i++)
+   {
+      ENUM_TIMEFRAMES tf = tfList[i];
+      string tfName = tfNames[i];
+      string arrow = "→";
+      string bias = "Mixed";
+
+      double slope = iMA(_Symbol, tf, 8, 3, MODE_SMA, PRICE_CLOSE) -
+                     iMA(_Symbol, tf, 8, 0, MODE_SMA, PRICE_CLOSE);
+
+      int upC=0, downC=0;
+      for(int j=1; j<=5; j++)
+      {
+         double cNow = iClose(_Symbol, tf, j);
+         double cPrev = iClose(_Symbol, tf, j+1);
+         if(cNow > cPrev) upC++;
+         if(cNow < cPrev) downC++;
+      }
+
+      if(slope > 0.0003 || upC >= 4) { arrow = "↑"; bias = "Buy"; buy++; }
+      else if(slope < -0.0003 || downC >= 4) { arrow = "↓"; bias = "Sell"; sell++; }
+
+      biasLines += " " + tfName + " : " + arrow + " " + bias + "\n";
+   }
+
+   string finalSignal = "Neutral";
+   if(buy > sell) finalSignal = "BUY";
+   else if(sell > buy) finalSignal = "SELL";
+   else finalSignal = "MIXED";
+
+   int confidence = 70 + MathMax(buy,sell) * 5;
+   confidence = MathMin(confidence, 100);
+
+   string magnetDir = GetMagnetDirection();
+
+   double atr = iATR(_Symbol, PERIOD_H1, 14);
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+   double sl = bid - atr * 1.5;
+   double tp = bid + atr * 2.0;
+   if(finalSignal == "SELL") { sl = bid + atr * 1.5; tp = bid - atr * 2.0; }
+
+   string tradeStatus = "CHILL 🧘";
+   if(finalSignal == "BUY" || finalSignal == "SELL")
+      tradeStatus = "READY ✅";
+   if(finalSignal == "MIXED")
+      tradeStatus = "STANDBY ⚪";
+
+   string zoneWarning = "";
+   if(ShowZoneWarning && IsNearZone())
+      zoneWarning = "⚠️ Near Zone";
+
+   string alfredComment = GetAlfredComment(finalSignal, magnetDir);
+
+//== Build Pane Text ==
+string paneText = "";
+paneText = "AlfredAI Pane™\n";
+paneText += "Symbol: " + _Symbol + "\n";
+paneText += "══════════════════════════════\n";
+paneText += "TF Biases:\n";
+// ... (bias loop stays the same)
+paneText += "══════════════════════════════\n";
+paneText += "Final Signal: " + finalSignal + " (" + IntegerToString(confidence) + "%)\n";
+paneText += "Magnet Zone: " + magnetDir + "\n";
+if(zoneWarning != "") paneText += zoneWarning + "\n";
+paneText += "══════════════════════════════\n";
+
+//== SL/TP in Pips ==
+int slPips = (int)(MathAbs(bid - sl) / _Point);
+int tpPips = (int)(MathAbs(tp - bid) / _Point);
+paneText += "If Trade Now:\n";
+paneText += " SL: " + IntegerToString(slPips) + " pips\n";
+paneText += " TP: " + IntegerToString(tpPips) + " pips\n";
+
+//== Trade Status ==
+paneText += " Trade Status: ";
+if(finalSignal == "BUY" || finalSignal == "SELL")
+   paneText += "READY ✅\n";
+else
+   paneText += "WARNING ⚠️\n";
+
+paneText += "══════════════════════════════\n";
+paneText += "Alfred says:\n";
+
+//== Split Alfred Comment into Two Lines ==
+string commentLines[];
+StringSplit(alfredComment, '.', commentLines);
+
+if(ArraySize(commentLines) >= 1)
+   paneText += " " + commentLines[0] + ".\n";
+if(ArraySize(commentLines) >= 2)
+   paneText += " " + commentLines[1] + ".\n";
+   
+//== Multiline Label Rendering ==
+string lines[];
+StringSplit(paneText, '\n', lines);
+
+for(int i = 0; i < ArraySize(lines); i++)
+{
+   string objName = "AlfredAI_Line_" + IntegerToString(i);
+   if(ObjectFind(0, objName) < 0)
+      ObjectCreate(0, objName, OBJ_LABEL, 0, 0, 0);
+
+   ObjectSetInteger(0, objName, OBJPROP_CORNER, AIPaneCorner);
+   ObjectSetInteger(0, objName, OBJPROP_XDISTANCE, 400);
+   ObjectSetInteger(0, objName, OBJPROP_YDISTANCE, AIPaneYOffset + i * (AIPaneFontSize + 2));
+   ObjectSetInteger(0, objName, OBJPROP_FONTSIZE, 9);
+   ObjectSetInteger(0, objName, OBJPROP_COLOR, clrWhite);
+   ObjectSetInteger(0, objName, OBJPROP_SELECTABLE, false);
+   ObjectSetInteger(0, objName, OBJPROP_HIDDEN, true);
+   ObjectSetString(0, objName, OBJPROP_TEXT, lines[i]);
+}
+
+   return rates_total;
+}
+
+
+//== MagnetHUD Direction ==
+string GetMagnetDirection()
+{
+   string d,s,e;
+   GetTFMagnet(PERIOD_H1,d,s,e);
+   return d;
+}
+
+//== Zone Proximity Check ==
+bool IsNearZone()
+{
+   string zones[] = {"DZone_LTF","DZone_H1","DZone_H4","DZone_D1",
+                     "SZone_LTF","SZone_H1","SZone_H4","SZone_D1"};
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   for(int i=0; i<ArraySize(zones); i++)
+   {
+      string z = zones[i];
+      if(ObjectFind(0,z)>=0)
+      {
+         double p1 = ObjectGetDouble(0,z,OBJPROP_PRICE,0);
+         double p2 = ObjectGetDouble(0,z,OBJPROP_PRICE,1);
+         double mid = (p1 + p2) / 2;
+         double dist = MathAbs(bid - mid);
+         if(dist <= 20 * _Point) return true;
+      }
+   }
+   return false;
+}
+
+//== Alfred Says Engine ==
+string GetAlfredComment(string signal, string zone)
+{
+   if(signal == "BUY" && zone == "Demand") return "Buy bias confirmed. Momentum building.";
+   if(signal == "SELL" && zone == "Supply") return "Sellers dominate. Patience pays.";
+   if(signal == "MIXED") return "Mixed signals. Stay sharp, stay chill.";
+   if(signal == "BUY" && zone == "Supply") return "Buy bias vs Supply zone. Caution advised.";
+   if(signal == "SELL" && zone == "Demand") return "Sell bias vs Demand zone. Watch for flips.";
+   return "Market indecisive. Observe and wait.";
+}
+
+//== MagnetHUD Zone Reader ==
+double GetTFMagnet(ENUM_TIMEFRAMES tf, string &direction, string &strength, string &eta)
+{
+   string demandZones[] = {"DZone_LTF","DZone_H1","DZone_H4","DZone_D1"};
+   string supplyZones[] = {"SZone_LTF","SZone_H1","SZone_H4","SZone_D1"};
+   double scoreD=-999, scoreS=-999, bestDemand=EMPTY_VALUE, bestSupply=EMPTY_VALUE;
+
+   for(int i=0; i<ArraySize(demandZones); i++)
+   {
+      string z = demandZones[i];
+      if(ObjectFind(0,z)>=0)
+      {
+         double p1=ObjectGetDouble(0,z,OBJPROP_PRICE,0);
+         double p2=ObjectGetDouble(0,z,OBJPROP_PRICE,1);
+         double mid=(p1+p2)/2;
+         double dist=MathAbs(SymbolInfoDouble(_Symbol,SYMBOL_BID)-mid);
+         double width=MathAbs(p1-p2);
+         double score=1000 - dist/_Point - width/_Point;
+         if(score > scoreD){ scoreD=score; bestDemand=mid; }
+      }
+   }
+
+   for(int i=0; i<ArraySize(supplyZones); i++)
+   {
+      string z = supplyZones[i];
+      if(ObjectFind(0,z)>=0)
+      {
+         double p1=ObjectGetDouble(0,z,OBJPROP_PRICE,0);
+         double p2=ObjectGetDouble(0,z,OBJPROP_PRICE,1);
+         double mid=(p1+p2)/2;
+         double dist=MathAbs(SymbolInfoDouble(_Symbol,SYMBOL_BID)-mid);
+         double width=MathAbs(p1-p2);
+         double score=1000 - dist/_Point - width/_Point;
+         if(score > scoreS){ scoreS=score; bestSupply=mid; }
+      }
+   }
+
+   bool useDemand = (scoreD >= scoreS);
+   direction = useDemand ? "Demand" : "Supply";
+   strength = ""; eta = "~";
+   return useDemand ? bestDemand : bestSupply;
+}
