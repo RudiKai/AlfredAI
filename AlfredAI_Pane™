@@ -49,7 +49,7 @@ int OnCalculate(const int rates_total,
       string tfName = tfNames[i];
       string arrow = "→";
       string bias = "Mixed";
-
+if(Bars(_Symbol, tfList[i]) < 10) continue;
       double slope = iMA(_Symbol, tf, 8, 3, MODE_SMA, PRICE_CLOSE) -
                      iMA(_Symbol, tf, 8, 0, MODE_SMA, PRICE_CLOSE);
 
@@ -81,9 +81,11 @@ int OnCalculate(const int rates_total,
    double atr = iATR(_Symbol, PERIOD_H1, 14);
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
-   double sl = bid - atr * 1.5;
-   double tp = bid + atr * 2.0;
-   if(finalSignal == "SELL") { sl = bid + atr * 1.5; tp = bid - atr * 2.0; }
+// SL/TP calculation
+double sl = bid - atr * 1.5;
+double tp = bid + atr * 2.0;
+if(finalSignal == "SELL") { sl = bid + atr * 1.5; tp = bid - atr * 2.0; }
+
 
    string tradeStatus = "CHILL 🧘";
    if(finalSignal == "BUY" || finalSignal == "SELL")
@@ -103,19 +105,64 @@ paneText = "AlfredAI Pane™\n";
 paneText += "Symbol: " + _Symbol + "\n";
 paneText += "══════════════════════════════\n";
 paneText += "TF Biases:\n";
-// ... (bias loop stays the same)
-paneText += "══════════════════════════════\n";
-paneText += "Final Signal: " + finalSignal + " (" + IntegerToString(confidence) + "%)\n";
-paneText += "Magnet Zone: " + magnetDir + "\n";
-if(zoneWarning != "") paneText += zoneWarning + "\n";
+
+for(int i=0; i<ArraySize(tfList); i++)
+{
+   ENUM_TIMEFRAMES tf = tfList[i];
+   string tfName = StringFormat("%-4s", tfNames[i]);
+
+   if(Bars(_Symbol, tf) < 10)
+   {
+      paneText += " " + tfName + ": [no data]\n";
+      continue;
+   }
+
+   double slope = iMA(_Symbol, tf, 8, 3, MODE_SMA, PRICE_CLOSE) -
+                  iMA(_Symbol, tf, 8, 0, MODE_SMA, PRICE_CLOSE);
+
+   int upC=0, downC=0;
+   for(int j=1; j<=5; j++)
+   {
+      double cNow = iClose(_Symbol, tf, j);
+      double cPrev = iClose(_Symbol, tf, j+1);
+      if(cNow > cPrev) upC++;
+      if(cNow < cPrev) downC++;
+   }
+
+   string arrow = "→", bias = "Mixed";
+   if(slope > 0.0003 || upC >= 4) { arrow = "↑"; bias = "Buy"; }
+   else if(slope < -0.0003 || downC >= 4) { arrow = "↓"; bias = "Sell"; }
+
+   paneText += " " + tfName + ": " + arrow + " " + bias + "\n";
+}
 paneText += "══════════════════════════════\n";
 
 //== SL/TP in Pips ==
-int slPips = (int)(MathAbs(bid - sl) / _Point);
-int tpPips = (int)(MathAbs(tp - bid) / _Point);
-paneText += "If Trade Now:\n";
-paneText += " SL: " + IntegerToString(slPips) + " pips\n";
-paneText += " TP: " + IntegerToString(tpPips) + " pips\n";
+// Pip size logic
+//== SL/TP in Pips ==
+double pipSize;
+
+if(_Digits == 5 || _Digits == 4)
+   pipSize = 0.00010;
+else if(_Digits == 3 || _Digits == 2)
+   pipSize = 0.10;
+else
+   pipSize = _Point;
+
+double slDist = MathAbs(sl - bid);
+double tpDist = MathAbs(tp - bid);
+
+int slPips = (int)(slDist / pipSize);
+int tpPips = (int)(tpDist / pipSize);
+
+// Format price cleanly
+string slPrice = DoubleToString(sl, (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS));
+string tpPrice = DoubleToString(tp, (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS));
+
+// Display
+paneText += " SL: " + IntegerToString(slPips) + " pips (" + slPrice + ")\n";
+paneText += " TP: " + IntegerToString(tpPips) + " pips (" + tpPrice + ")\n";
+
 
 //== Trade Status ==
 paneText += " Trade Status: ";
