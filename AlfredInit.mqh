@@ -1,5 +1,5 @@
 //+------------------------------------------------------------------+
-//| AlfredInit.mqh — Initialize AlfredSettings                      |
+//| AlfredInit.mqh — Initialize AlfredSettings                       |
 //+------------------------------------------------------------------+
 #ifndef __ALFRED_INIT__
 #define __ALFRED_INIT__
@@ -38,6 +38,21 @@ void InitAlfredDefaults()
    Alfred.hudCorner              = CORNER_LEFT_UPPER;
    Alfred.hudXOffset             = 10;
    Alfred.hudYOffset             = 20;
+   
+   // SupDemCore defaults
+Alfred.supdemZoneLookback           = 50;
+Alfred.supdemZoneDurationBars       = 15;
+Alfred.supdemMinImpulseMovePips     = 20.0;
+Alfred.supdemDemandColorHTF         = clrNavy;
+Alfred.supdemDemandColorLTF         = clrLime;
+Alfred.supdemSupplyColorHTF         = clrIndigo;
+Alfred.supdemSupplyColorLTF         = clrRed;
+Alfred.supdemRefreshRateSeconds     = 5;
+Alfred.supdemEnableBreakoutRemoval  = true;
+Alfred.supdemRequireBodyClose       = true;
+Alfred.supdemEnableTimeDecay        = true;
+Alfred.supdemTimeDecayBars          = 60;
+Alfred.supdemEnableMagnetForecast   = true;
 }
 
 #endif
