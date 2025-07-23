@@ -36,6 +36,21 @@ struct AlfredSettings
    int   hudCorner;
    int   hudXOffset;
    int   hudYOffset;
+   
+  // SupDemCore settings
+  int    supdemZoneLookback;
+  int    supdemZoneDurationBars;
+  double supdemMinImpulseMovePips;
+  color  supdemDemandColorHTF;
+  color  supdemDemandColorLTF;
+  color  supdemSupplyColorHTF;
+  color  supdemSupplyColorLTF;
+  int    supdemRefreshRateSeconds;
+  bool   supdemEnableBreakoutRemoval;
+  bool   supdemRequireBodyClose;
+  bool   supdemEnableTimeDecay;
+  int    supdemTimeDecayBars;
+  bool   supdemEnableMagnetForecast;
 };
 
 // global instance
