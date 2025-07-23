@@ -10,6 +10,7 @@
 #property indicator_label1  "AlfredAI_Pane™"
 
 #include <AlfredSettings.mqh>
+#include <AlfredInit.mqh>
 
 double dummyBuffer[];
 
@@ -22,24 +23,9 @@ int    atrHandle       = INVALID_HANDLE;
 //+------------------------------------------------------------------+
 int OnInit()
 {
-   // Initialize AlfredSettings (one place to tweak these later)
-   Alfred.fontSize               = 11;
-   Alfred.corner                 = CORNER_RIGHT_UPPER;
-   Alfred.xOffset                = 20;
-   Alfred.yOffset                = 20;
+   // Load central settings
+   InitAlfredDefaults();
 
-   Alfred.showZoneWarning        = true;
-   Alfred.enableAlerts           = true;
-   Alfred.enablePane             = true;
-   Alfred.enableHUD              = true;
-   Alfred.enableCompass          = true;
-
-   Alfred.atrMultiplierSL        = 1.5;
-   Alfred.atrMultiplierTP        = 2.0;
-   Alfred.sendTelegram           = true;
-   Alfred.sendWhatsApp           = false;
-   Alfred.alertSensitivity       = 3;
-   Alfred.zoneProximityThreshold = 20;
 
    // Set up dummy buffer for MT5
    SetIndexBuffer(0, dummyBuffer, INDICATOR_DATA);
