@@ -19,6 +19,14 @@ struct AlfredSettings
    bool  enableHUD;
    bool  enableCompass;
 
+   // AlertCenter settings
+   bool  enableAlertCenter;
+   bool  alertStrongBiasAligned;
+   bool  alertDivergence;
+   bool  alertZoneEntry;
+   bool  alertBiasFlip;
+   int   alertConfidenceThreshold;
+
    // Risk & SL/TP
    double atrMultiplierSL;
    double atrMultiplierTP;
@@ -36,21 +44,24 @@ struct AlfredSettings
    int   hudCorner;
    int   hudXOffset;
    int   hudYOffset;
-   
-  // SupDemCore settings
-  int    supdemZoneLookback;
-  int    supdemZoneDurationBars;
-  double supdemMinImpulseMovePips;
-  color  supdemDemandColorHTF;
-  color  supdemDemandColorLTF;
-  color  supdemSupplyColorHTF;
-  color  supdemSupplyColorLTF;
-  int    supdemRefreshRateSeconds;
-  bool   supdemEnableBreakoutRemoval;
-  bool   supdemRequireBodyClose;
-  bool   supdemEnableTimeDecay;
-  int    supdemTimeDecayBars;
-  bool   supdemEnableMagnetForecast;
+
+   // SupDemCore settings
+   int    supdemZoneLookback;
+   int    supdemZoneDurationBars;
+   double supdemMinImpulseMovePips;
+   color  supdemDemandColorHTF;
+   color  supdemDemandColorLTF;
+   color  supdemSupplyColorHTF;
+   color  supdemSupplyColorLTF;
+   int    supdemRefreshRateSeconds;
+   bool   supdemEnableBreakoutRemoval;
+   bool   supdemRequireBodyClose;
+   bool   supdemEnableTimeDecay;
+   int    supdemTimeDecayBars;
+   bool   supdemEnableMagnetForecast;
+
+   // Compass-specific layout
+   int   compassYOffset;
 };
 
 // global instance
