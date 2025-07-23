@@ -1,40 +1,53 @@
 //+------------------------------------------------------------------+
 //|                       AlfredAI_Pane™                             |
-//|                            v1.00                                  |
+//|                            v1.00                                 |
 //+------------------------------------------------------------------+
 #property indicator_chart_window
 #property strict
 #property indicator_buffers 1
 #property indicator_plots   1
 #property indicator_type1   DRAW_NONE
-#property indicator_label1  "AlfredAI_Pane"
+#property indicator_label1  "AlfredAI_Pane™"
+
+#include <AlfredSettings.mqh>
 
 double dummyBuffer[];
 
-//--- inputs
-input bool EnableAIPane     = true;
-input int  AIPaneCorner     = CORNER_RIGHT_UPPER;
-input int  AIPaneXOffset    = 20;
-input int  AIPaneYOffset    = 20;
-input int  AIPaneFontSize   = 11;
-input bool ShowZoneWarning  = true;
-
 //--- globals
 string lastFinalSignal = "Neutral";
-int    atrHandle        = INVALID_HANDLE;
+int    atrHandle       = INVALID_HANDLE;
 
 //+------------------------------------------------------------------+
 //| Custom indicator initialization function                         |
 //+------------------------------------------------------------------+
 int OnInit()
 {
-   // buffer for MT5 indicator interface
+   // Initialize AlfredSettings (one place to tweak these later)
+   Alfred.fontSize               = 11;
+   Alfred.corner                 = CORNER_RIGHT_UPPER;
+   Alfred.xOffset                = 20;
+   Alfred.yOffset                = 20;
+
+   Alfred.showZoneWarning        = true;
+   Alfred.enableAlerts           = true;
+   Alfred.enablePane             = true;
+   Alfred.enableHUD              = true;
+   Alfred.enableCompass          = true;
+
+   Alfred.atrMultiplierSL        = 1.5;
+   Alfred.atrMultiplierTP        = 2.0;
+   Alfred.sendTelegram           = true;
+   Alfred.sendWhatsApp           = false;
+   Alfred.alertSensitivity       = 3;
+   Alfred.zoneProximityThreshold = 20;
+
+   // Set up dummy buffer for MT5
    SetIndexBuffer(0, dummyBuffer, INDICATOR_DATA);
    ArrayInitialize(dummyBuffer, EMPTY_VALUE);
 
-   // create ATR handle (H1, period=14)
+   // Create ATR handle (H1, period=14)
    atrHandle = iATR(_Symbol, PERIOD_H1, 14);
-   if(atrHandle == INVALID_HANDLE)
+   if (atrHandle == INVALID_HANDLE)
       return(INIT_FAILED);
 
    return(INIT_SUCCEEDED);
@@ -54,102 +67,101 @@ int OnCalculate(const int rates_total,
                 const long     &volume[],
                 const int      &spread[])
 {
-   if(!EnableAIPane)
+   if (!Alfred.enablePane)
       return(rates_total);
 
-   //---- 1) Fetch the real ATR value from the handle
+   // 1) Fetch the real ATR value
    double atrArr[];
    double atr = 0.0;
-   if(CopyBuffer(atrHandle, 0, 0, 1, atrArr) == 1)
+   if (CopyBuffer(atrHandle, 0, 0, 1, atrArr) == 1)
       atr = atrArr[0];
 
-   //---- 2) Build time-frame bias counts
+   // 2) Build time-frame bias counts
    ENUM_TIMEFRAMES tfList[] = { PERIOD_M15, PERIOD_M30, PERIOD_H1, PERIOD_H2, PERIOD_H4 };
    string          tfNames[] = { "M15", "M30", "H1", "H2", "H4" };
 
-   int    buy=0, sell=0;
+   int    buy = 0, sell = 0;
    string biasLines = "";
 
-   for(int i=0; i<ArraySize(tfList); i++)
+   for (int i = 0; i < ArraySize(tfList); i++)
    {
-      ENUM_TIMEFRAMES tf = tfList[i];
-      string tfName     = tfNames[i];
-      string arrow      = "→";
-      string bias       = "Mixed";
+      ENUM_TIMEFRAMES tf   = tfList[i];
+      string          name = tfNames[i];
+      string          arrow = "→";
+      string          bias  = "Mixed";
 
-      if(Bars(_Symbol, tf) < 10) 
+      if (Bars(_Symbol, tf) < 10) 
          continue;
 
       // slope = MA(shift=3) - MA(shift=0)
       double slope = iMA(_Symbol, tf, 8, 3, MODE_SMA, PRICE_CLOSE)
                    - iMA(_Symbol, tf, 8, 0, MODE_SMA, PRICE_CLOSE);
 
-      int upC=0, downC=0;
-      for(int j=1; j<=5; j++)
+      int upC = 0, downC = 0;
+      for (int j = 1; j <= 5; j++)
       {
          double cNow  = iClose(_Symbol, tf, j);
-         double cPrev = iClose(_Symbol, tf, j+1);
-         if(cNow > cPrev) upC++;
-         if(cNow < cPrev) downC++;
+         double cPrev = iClose(_Symbol, tf, j + 1);
+         if (cNow > cPrev) upC++;
+         if (cNow < cPrev) downC++;
       }
 
-      if(slope > 0.0003 || upC >= 4) 
-      { arrow="↑"; bias="Buy";  buy++;  }
-      else if(slope < -0.0003 || downC >= 4) 
-      { arrow="↓"; bias="Sell"; sell++; }
+      if (slope > 0.0003 || upC >= 4)      { arrow = "↑"; bias = "Buy";  buy++;  }
+      else if (slope < -0.0003 || downC >= 4) { arrow = "↓"; bias = "Sell"; sell++; }
 
-      biasLines += " " + tfName + " : " + arrow + " " + bias + "\n";
+      biasLines += " " + name + " : " + arrow + " " + bias + "\n";
    }
 
-   //---- 3) Final signal & confidence
+   // 3) Final signal & confidence
    string finalSignal = "Neutral";
-   if(buy > sell)      finalSignal = "BUY";
-   else if(sell > buy) finalSignal = "SELL";
-   else                finalSignal = "MIXED";
-
+   if      (buy > sell) finalSignal = "BUY";
+   else if (sell > buy) finalSignal = "SELL";
+   else                 finalSignal = "MIXED";
    lastFinalSignal = finalSignal;
+
    int confidence = 70 + MathMax(buy, sell) * 5;
    confidence = MathMin(confidence, 100);
 
-   //---- 4) Zone & magnet
-   string magnetDir  = GetMagnetDirection();
-   string zoneWarn   = "";
-   if(ShowZoneWarning && IsNearZone())
+   // 4) Zone & magnet
+   string magnetDir = GetMagnetDirection();
+   string zoneWarn  = "";
+   if (Alfred.showZoneWarning && IsNearZone())
       zoneWarn = "⚠️ Near Zone";
 
    string alfredComment = GetAlfredComment(finalSignal, magnetDir);
 
-   //---- 5) SL/TP prices based on ATR
+   // 5) SL/TP prices based on ATR multipliers
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   double sl  = (finalSignal == "BUY") ? bid - atr * 1.5 : bid + atr * 1.5;
-   double tp  = (finalSignal == "BUY") ? bid + atr * 2.0 : bid - atr * 2.0;
+   double sl  = (finalSignal == "BUY")
+                ? bid - atr * Alfred.atrMultiplierSL
+                : bid + atr * Alfred.atrMultiplierSL;
+   double tp  = (finalSignal == "BUY")
+                ? bid + atr * Alfred.atrMultiplierTP
+                : bid - atr * Alfred.atrMultiplierTP;
 
-   //---- 6) Convert distances into pips
-   double pipSize = (_Digits >= 5 || _Digits == 4) ? 0.00010 :
-                    (_Digits == 3 || _Digits == 2) ? 0.10 : _Point;
+   // 6) Convert distances into pips
+   double pipSize = (_Digits >= 5) ? 0.00010 :
+                    (_Digits >= 2) ? 0.10    : _Point;
+   double slDist  = MathAbs(sl - bid);
+   double tpDist  = MathAbs(tp - bid);
+   int    slPips  = (int)(slDist / pipSize);
+   int    tpPips  = (int)(tpDist / pipSize);
 
-   double slDist = MathAbs(sl - bid);
-   double tpDist = MathAbs(tp - bid);
-
-   int slPips = (int)(slDist / pipSize);
-   int tpPips = (int)(tpDist / pipSize);
-
-   //---- 7) Format SL/TP price cleanly
-   int digits    = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+   // 7) Format prices cleanly
+   int    digits  = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
    string slPrice = DoubleToString(sl, digits);
    string tpPrice = DoubleToString(tp, digits);
 
-   //---- 8) Build the pane text
+   // 8) Build pane text
    string paneText = "";
    paneText += "AlfredAI Pane™\n";
    paneText += "Symbol: " + _Symbol + "\n";
    paneText += "══════════════════════════════\n";
-   paneText += "TF Biases:\n";
-   paneText += biasLines;
+   paneText += "TF Biases:\n" + biasLines;
    paneText += "══════════════════════════════\n";
    paneText += "Final Signal: " + finalSignal + " (" + IntegerToString(confidence) + "%)\n";
    paneText += "Magnet Zone: " + magnetDir + "\n";
-   if(zoneWarn != "") paneText += zoneWarn + "\n";
+   if (zoneWarn != "") paneText += zoneWarn + "\n";
    paneText += "══════════════════════════════\n";
    paneText += "If Trade Now:\n";
    paneText += " SL: " + IntegerToString(slPips) + " pips (" + slPrice + ")\n";
@@ -158,28 +170,27 @@ int OnCalculate(const int rates_total,
    paneText += "══════════════════════════════\n";
    paneText += "Alfred says:\n";
 
-   // break Alfred comment into up to 2 lines
    string commentLines[];
    StringSplit(alfredComment, '.', commentLines);
-   if(ArraySize(commentLines) >= 1) paneText += " " + commentLines[0] + ".\n";
-   if(ArraySize(commentLines) >= 2) paneText += " " + commentLines[1] + ".\n";
+   if (ArraySize(commentLines) >= 1) paneText += " " + commentLines[0] + ".\n";
+   if (ArraySize(commentLines) >= 2) paneText += " " + commentLines[1] + ".\n";
 
-   //---- 9) Draw as chart labels
+   // 9) Draw chart labels
    string lines[];
    StringSplit(paneText, '\n', lines);
-   for(int i=0; i<ArraySize(lines); i++)
+   for (int i = 0; i < ArraySize(lines); i++)
    {
       string objName = "AlfredAI_Line_" + IntegerToString(i);
-      if(ObjectFind(0, objName) < 0)
+      if (ObjectFind(0, objName) < 0)
          ObjectCreate(0, objName, OBJ_LABEL, 0, 0, 0);
 
-      ObjectSetInteger(0, objName, OBJPROP_CORNER,    AIPaneCorner);
-      ObjectSetInteger(0, objName, OBJPROP_XDISTANCE, 250);
-      ObjectSetInteger(0, objName, OBJPROP_YDISTANCE, AIPaneYOffset + i*(AIPaneFontSize+2));
-      ObjectSetInteger(0, objName, OBJPROP_FONTSIZE,  9);
+      ObjectSetInteger(0, objName, OBJPROP_CORNER,    Alfred.corner);
+      ObjectSetInteger(0, objName, OBJPROP_XDISTANCE, Alfred.xOffset);
+      ObjectSetInteger(0, objName, OBJPROP_YDISTANCE, Alfred.yOffset + i*(Alfred.fontSize+2));
+      ObjectSetInteger(0, objName, OBJPROP_FONTSIZE,  Alfred.fontSize);
       ObjectSetInteger(0, objName, OBJPROP_COLOR,     clrWhite);
-      ObjectSetInteger(0, objName, OBJPROP_SELECTABLE, false);
-      ObjectSetInteger(0, objName, OBJPROP_HIDDEN,     true);
+      ObjectSetInteger(0, objName, OBJPROP_SELECTABLE,false);
+      ObjectSetInteger(0, objName, OBJPROP_HIDDEN,    true);
       ObjectSetString(0, objName, OBJPROP_TEXT,       lines[i]);
    }
 
@@ -202,17 +213,17 @@ string GetMagnetDirection()
 bool IsNearZone()
 {
    string zones[] = {
-     "DZone_LTF","DZone_H1","DZone_H4","DZone_D1",
-     "SZone_LTF","SZone_H1","SZone_H4","SZone_D1"
+      "DZone_LTF","DZone_H1","DZone_H4","DZone_D1",
+      "SZone_LTF","SZone_H1","SZone_H4","SZone_D1"
    };
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   for(int i=0; i<ArraySize(zones); i++)
+   for (int i=0; i < ArraySize(zones); i++)
    {
-      if(ObjectFind(0, zones[i]) < 0) continue;
+      if (ObjectFind(0, zones[i]) < 0) continue;
       double p1 = ObjectGetDouble(0, zones[i], OBJPROP_PRICE, 0);
       double p2 = ObjectGetDouble(0, zones[i], OBJPROP_PRICE, 1);
       double mid = (p1 + p2) / 2;
-      if(MathAbs(bid - mid) <= 20 * _Point) 
+      if (MathAbs(bid - mid) <= Alfred.zoneProximityThreshold * _Point) 
          return(true);
    }
    return(false);
@@ -226,8 +237,8 @@ string GetAlfredComment(string signal, string zone)
    if(signal=="BUY"  && zone=="Demand") return("Buy bias confirmed. Momentum building.");
    if(signal=="SELL" && zone=="Supply") return("Sellers dominate. Patience pays.");
    if(signal=="MIXED")                    return("Mixed signals. Stay sharp, stay chill.");
-   if(signal=="BUY"  && zone=="Supply") return("Buy bias vs Supply zone. Caution advised.");
-   if(signal=="SELL" && zone=="Demand") return("Sell bias vs Demand zone. Watch for flips.");
+   if(signal=="BUY"  && zone=="Supply")  return("Buy bias vs Supply zone. Caution advised.");
+   if(signal=="SELL" && zone=="Demand")  return("Sell bias vs Demand zone. Watch for flips.");
    return("Market indecisive. Observe and wait.");
 }
 
@@ -238,31 +249,34 @@ double GetTFMagnet(ENUM_TIMEFRAMES tf, string &direction, string &strength, stri
 {
    string demandZones[] = {"DZone_LTF","DZone_H1","DZone_H4","DZone_D1"};
    string supplyZones[] = {"SZone_LTF","SZone_H1","SZone_H4","SZone_D1"};
-   double scoreD = -DBL_MAX, scoreS = -DBL_MAX, bestDemand = EMPTY_VALUE, bestSupply = EMPTY_VALUE;
+   double scoreD = -DBL_MAX, scoreS = -DBL_MAX;
+   double bestDemand = EMPTY_VALUE, bestSupply = EMPTY_VALUE;
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
 
-   for(int i=0; i<ArraySize(demandZones); i++)
+   for (int i=0; i < ArraySize(demandZones); i++)
    {
-      if(ObjectFind(0, demandZones[i]) < 0) continue;
-      double p1    = ObjectGetDouble(0, demandZones[i], OBJPROP_PRICE, 0);
-      double p2    = ObjectGetDouble(0, demandZones[i], OBJPROP_PRICE, 1);
-      double mid   = (p1 + p2) / 2;
-      double dist  = MathAbs(bid - mid);
+      if (ObjectFind(0, demandZones[i]) < 0) continue;
+      double p1 = ObjectGetDouble(0, demandZones[i], OBJPROP_PRICE, 0);
+      double p2 = ObjectGetDouble(0, demandZones[i], OBJPROP_PRICE, 1);
+      double mid = (p1 + p2) / 2;
+      double dist = MathAbs(bid - mid);
       double width = MathAbs(p1 - p2);
       double score = 1000 - dist/_Point - width/_Point;
-      if(score > scoreD) { scoreD=score; bestDemand=mid; }
+      if (score > scoreD) { scoreD = score; bestDemand = mid; }
    }
-   for(int i=0; i<ArraySize(supplyZones); i++)
+
+   for (int i=0; i < ArraySize(supplyZones); i++)
    {
-      if(ObjectFind(0, supplyZones[i]) < 0) continue;
-      double p1    = ObjectGetDouble(0, supplyZones[i], OBJPROP_PRICE, 0);
-      double p2    = ObjectGetDouble(0, supplyZones[i], OBJPROP_PRICE, 1);
-      double mid   = (p1 + p2) / 2;
-      double dist  = MathAbs(bid - mid);
+      if (ObjectFind(0, supplyZones[i]) < 0) continue;
+      double p1 = ObjectGetDouble(0, supplyZones[i], OBJPROP_PRICE, 0);
+      double p2 = ObjectGetDouble(0, supplyZones[i], OBJPROP_PRICE, 1);
+      double mid = (p1 + p2) / 2;
+      double dist = MathAbs(bid - mid);
       double width = MathAbs(p1 - p2);
       double score = 1000 - dist/_Point - width/_Point;
-      if(score > scoreS) { scoreS=score; bestSupply=mid; }
+      if (score > scoreS) { scoreS = score; bestSupply = mid; }
    }
+
    bool useDemand = (scoreD >= scoreS);
    direction = useDemand ? "Demand" : "Supply";
    strength  = "";
