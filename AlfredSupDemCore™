@@ -1,212 +1,149 @@
 //+------------------------------------------------------------------+
-//|                   // --- AlfredSupDemCore™ ---
-//               Structural zone generator for AlfredHUD™            |
+//|                       AlfredSupDemCore™                         |
+//|      Structural Supply/Demand zone generator for Alfred Suite    |
 //+------------------------------------------------------------------+
 #property indicator_chart_window
 #property strict
 #property indicator_buffers 1
 #property indicator_plots   1
 #property indicator_type1   DRAW_NONE
-#property indicator_label1  "Dummy"
+#property indicator_label1  "AlfredSupDemCore™"
+
+#include <AlfredSettings.mqh>
+#include <AlfredInit.mqh>
 
 double zoneBuffer[];
 
-//=== INPUTS =========================================================
-input int    ZoneLookback             = 50;
-input int    ZoneDurationBars         = 15;
-input double MinImpulseMovePips       = 20.0;
-input color  DemandColor_HTF          = clrNavy;
-input color  DemandColor_LTF          = clrLime;
-input color  SupplyColor_HTF          = clrIndigo;
-input color  SupplyColor_LTF          = clrRed;
-input int    RefreshRateSeconds       = 5;
-
-input bool   EnableBreakoutRemoval    = true;
-input bool   RequireBodyClose         = true;
-input bool   EnableTimeDecay          = true;
-input int    TimeDecayBars            = 60;
-input bool   EnableMagnetForecast     = true;
-
 //+------------------------------------------------------------------+
-//| Initialization                                                  |
+//| Initialization                                                   |
 //+------------------------------------------------------------------+
 int OnInit()
 {
+   // load all your defaults from AlfredInit.mqh
+   InitAlfredDefaults();
+
+   // set up dummy buffer
    SetIndexBuffer(0, zoneBuffer, INDICATOR_DATA);
    ArrayInitialize(zoneBuffer, EMPTY_VALUE);
-   EventSetTimer(RefreshRateSeconds);
+
+   // timer for dynamic redraw
+   EventSetTimer(Alfred.supdemRefreshRateSeconds);
+
    return(INIT_SUCCEEDED);
 }
-//=== Magnet Projection Module — Alfred Engine ===
+
+//+------------------------------------------------------------------+
+//| Helper: Draw or update one “magnet” projection line              |
+//+------------------------------------------------------------------+
 void CalculateMagnetProjection(string zoneName, ENUM_TIMEFRAMES tf)
-
 {
-   //== Check if zone exists on chart ==
-   if(ObjectFind(0, zoneName) < 0) return;
+   if(ObjectFind(0, zoneName) < 0) 
+      return;
 
-   //== Get midpoint of the zone line ==
-   double p1 = ObjectGetDouble(0, zoneName, OBJPROP_PRICE, 0);
-   double p2 = ObjectGetDouble(0, zoneName, OBJPROP_PRICE, 1);
-   double mid = (p1 + p2) / 2;
+   // midpoint of the zone
+   double p1   = ObjectGetDouble(0, zoneName, OBJPROP_PRICE, 0);
+   double p2   = ObjectGetDouble(0, zoneName, OBJPROP_PRICE, 1);
+   double mid  = (p1 + p2) / 2.0;
 
-   //== Projection anchor from candle 1 to candle 4 of the timeframe ==
+   // time anchor
    datetime t1 = iTime(_Symbol, tf, 1);
    datetime t2 = iTime(_Symbol, tf, 4);
 
-   //== Create magnet line with directional bias ==
-   string magnetObj = "MagnetLine_" + zoneName;
-   color c = StringFind(zoneName, "DZone") >= 0 ? clrLime : clrTomato;
-
-   //== Create or update the line on chart ==
-   if(ObjectFind(0, magnetObj) < 0)
-      ObjectCreate(0, magnetObj, OBJ_TREND, 0, t1, mid, t2, mid);
+   // pick color by zone type & timeframe
+   color c;
+   if(StringFind(zoneName, "DZone_LTF") >= 0)
+      c = Alfred.supdemDemandColorLTF;
+   else if(StringFind(zoneName, "DZone") >= 0)
+      c = Alfred.supdemDemandColorHTF;
+   else if(StringFind(zoneName, "SZone_LTF") >= 0)
+      c = Alfred.supdemSupplyColorLTF;
    else
-      ObjectMove(0, magnetObj, 0, t1, mid);
+      c = Alfred.supdemSupplyColorHTF;
 
-   ObjectMove(0, magnetObj, 1, t2, mid);
-   ObjectSetInteger(0, magnetObj, OBJPROP_COLOR, c);
-   ObjectSetInteger(0, magnetObj, OBJPROP_WIDTH, 2);
-   ObjectSetInteger(0, magnetObj, OBJPROP_STYLE, STYLE_DASH);
-
-   //== Label the magnet visually for clarity ==
-   ObjectSetString(0, magnetObj, OBJPROP_TEXT, "Magnet Projection → " + zoneName);
-}
-
-//+------------------------------------------------------------------+
-//| Deinitialization                                                |
-//+------------------------------------------------------------------+
-//=== MAGNET HELPERS =================================================
-//+------------------------------------------------------------------+
-//| Projects magnet trendline from strongest zone                    |
-//+------------------------------------------------------------------+
-double ProjectMagnetLine(string &zones[], string label, color clr)
-{
-   double bestMid = EMPTY_VALUE, bestScore = -1e12;
-   for(int i = 0; i < ArraySize(zones); i++)
-   {
-      string z = zones[i];
-      if(ObjectFind(0, z) < 0) continue;
-      double p1 = ObjectGetDouble(0, z, OBJPROP_PRICE, 0);
-      double p2 = ObjectGetDouble(0, z, OBJPROP_PRICE, 1);
-      double mid = (p1 + p2) / 2;
-      double dist  = MathAbs(SymbolInfoDouble(_Symbol, SYMBOL_BID) - mid) / _Point;
-      double width = MathAbs(p1 - p2) / _Point;
-      double score = 1000 - dist - width;
-      if(score > bestScore) { bestScore = score; bestMid = mid; }
-   }
-   if(bestMid == EMPTY_VALUE) return EMPTY_VALUE;
-
-   datetime t1 = TimeCurrent(), t2 = t1 + PeriodSeconds(_Period) * 3;
-   string obj = label + "_Magnet";
+   string obj = "MagnetLine_" + zoneName;
    if(ObjectFind(0, obj) < 0)
-      ObjectCreate(0, obj, OBJ_TREND, 0, t1, bestMid, t2, bestMid);
+      ObjectCreate(0, obj, OBJ_TREND, 0, t1, mid, t2, mid);
    else
    {
-      ObjectMove(0, obj, 0, t1, bestMid);
-      ObjectMove(0, obj, 1, t2, bestMid);
+      ObjectMove(0, obj, 0, t1, mid);
+      ObjectMove(0, obj, 1, t2, mid);
    }
-   ObjectSetInteger(0, obj, OBJPROP_COLOR, clr);
+
+   ObjectSetInteger(0, obj, OBJPROP_COLOR, c);
    ObjectSetInteger(0, obj, OBJPROP_WIDTH, 2);
-   ObjectSetInteger(0, obj, OBJPROP_STYLE, STYLE_DASHDOT);
-   ObjectSetInteger(0, obj, OBJPROP_BACK, true);
-
-   return bestMid;
+   ObjectSetInteger(0, obj, OBJPROP_STYLE, STYLE_DASH);
+   ObjectSetString (0, obj, OBJPROP_TEXT, "Magnet → " + zoneName);
 }
 
 //+------------------------------------------------------------------+
-//| Displays ETA & impulse bias in a corner label                    |
+//| Deinitialization                                                 |
 //+------------------------------------------------------------------+
-void ShowMagnetLabel(string id, double midPrice)
-{
-   if(midPrice == EMPTY_VALUE) return;
-   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   int eta = (int)(MathAbs(bid - midPrice) / _Point / 5.0);
-
-   double o1 = iOpen(_Symbol, _Period, 1), c1 = iClose(_Symbol, _Period, 1);
-   double o2 = iOpen(_Symbol, _Period, 2), c2 = iClose(_Symbol, _Period, 2);
-   double impulse = MathAbs(c1 - o1) + MathAbs(c2 - o2);
-   string bias = impulse > 2 * _Point ? "🔼 Strong" :
-                 impulse >     _Point ? "➖ Mild"   : "🔽 Weak";
-
-   string nm = id + "_HUD";
-   if(ObjectFind(0, nm) < 0)
-      ObjectCreate(0, nm, OBJ_LABEL, 0, 0, 0);
-   ObjectSetInteger(0, nm, OBJPROP_CORNER, CORNER_RIGHT_LOWER);
-   ObjectSetInteger(0, nm, OBJPROP_XDISTANCE, id == "Demand" ? 20 : 350);
-   ObjectSetInteger(0, nm, OBJPROP_YDISTANCE, 60);
-   ObjectSetInteger(0, nm, OBJPROP_FONTSIZE, 9);
-   ObjectSetInteger(0, nm, OBJPROP_COLOR, clrWhite);
-   ObjectSetString(0, nm, OBJPROP_TEXT,
-      "🧲 " + id + " Magnet\nETA: ~" + IntegerToString(eta) +
-      " min\nImpulse: " + bias);
-}
-
-//+------------------------------------------------------------------+
-//| Main magnet drawing logic                                        |
-//+------------------------------------------------------------------+
-void DrawMagnetLine()
-{
-   if(!EnableMagnetForecast) return;
-
-string dZones[] = {"DZone_LTF", "DZone_H1", "DZone_H4", "DZone_D1"};
-string sZones[] = {"SZone_LTF", "SZone_H1", "SZone_H4", "SZone_D1"};
-
-double dMid = ProjectMagnetLine(dZones, "Demand", clrLime);
-double sMid = ProjectMagnetLine(sZones, "Supply", clrTomato);
-
-   ShowMagnetLabel("Demand", dMid);
-   ShowMagnetLabel("Supply", sMid);
-}
 void OnDeinit(const int reason)
 {
    EventKillTimer();
-   string toDelete[] =
-   {
+   // delete all zone & magnet objects
+   string del[] = {
       "DZone_LTF","SZone_LTF",
+      "DZone_M15","SZone_M15",
+      "DZone_M30","SZone_M30",
       "DZone_H1","SZone_H1",
+      "DZone_H2","SZone_H2",
       "DZone_H4","SZone_H4",
-      "DZone_D1","SZone_D1",
-      "MagnetLine"
+      "DZone_D1","SZone_D1"
    };
-   for(int i=0; i<ArraySize(toDelete); i++)
-      ObjectDelete(0, toDelete[i]);
+   for(int i=0; i<ArraySize(del); i++)
+      ObjectDelete(0, del[i]);
+
+   // also remove any magnet lines
+   int total = ObjectsTotal(0);
+   for(int i=total-1; i>=0; i--)
+   {
+      string name = ObjectName(0, i);
+      if(StringFind(name,"MagnetLine_") == 0)
+         ObjectDelete(0, name);
+   }
 }
 
 //+------------------------------------------------------------------+
-//| Timer & Chart redrawing                                         |
+//| Timer and Chart-Change → redraw                                  |
 //+------------------------------------------------------------------+
 void OnTimer()
 {
    DrawAllZones();
-   DrawMagnetLine();
+   if(Alfred.supdemEnableMagnetForecast)
+      DrawMagnetLine();
 }
 
-void OnChartEvent(const int id,
-                  const long &lparam,
-                  const double &dparam,
-                  const string &sparam)
+void OnChartEvent(const int id,const long &l,const double &d,const string &s)
 {
-   if(id == CHARTEVENT_CHART_CHANGE)
+   if(id==CHARTEVENT_CHART_CHANGE)
    {
       DrawAllZones();
-      DrawMagnetLine();
+      if(Alfred.supdemEnableMagnetForecast)
+         DrawMagnetLine();
    }
 }
 
 //+------------------------------------------------------------------+
-//| Draw Supply & Demand Zones                                      |
+//| Draw all zones for each timeframe                                |
 //+------------------------------------------------------------------+
 void DrawAllZones()
 {
-   DrawZones(_Period,     "LTF", DemandColor_LTF, SupplyColor_LTF, true);
-   DrawZones(PERIOD_M15,  "M15", DemandColor_LTF, SupplyColor_LTF, true);
-   DrawZones(PERIOD_M30,  "M30", DemandColor_LTF, SupplyColor_LTF, true);
-   DrawZones(PERIOD_H1,   "H1",  DemandColor_HTF, SupplyColor_HTF, false);
-   DrawZones(PERIOD_H2,   "H2",  DemandColor_HTF, SupplyColor_HTF, false);
-   DrawZones(PERIOD_H4,   "H4",  DemandColor_HTF, SupplyColor_HTF, false);
-   DrawZones(PERIOD_D1,   "D1",  DemandColor_HTF, SupplyColor_HTF, false);
+   // LTF zones
+   DrawZones(_Period,      "LTF", Alfred.supdemDemandColorLTF, Alfred.supdemSupplyColorLTF, true);
+   DrawZones(PERIOD_M15,   "M15", Alfred.supdemDemandColorLTF, Alfred.supdemSupplyColorLTF, true);
+   DrawZones(PERIOD_M30,   "M30", Alfred.supdemDemandColorLTF, Alfred.supdemSupplyColorLTF, true);
+
+   // HTF zones
+   DrawZones(PERIOD_H1,    "H1",  Alfred.supdemDemandColorHTF, Alfred.supdemSupplyColorHTF, false);
+   DrawZones(PERIOD_H2,    "H2",  Alfred.supdemDemandColorHTF, Alfred.supdemSupplyColorHTF, false);
+   DrawZones(PERIOD_H4,    "H4",  Alfred.supdemDemandColorHTF, Alfred.supdemSupplyColorHTF, false);
+   DrawZones(PERIOD_D1,    "D1",  Alfred.supdemDemandColorHTF, Alfred.supdemSupplyColorHTF, false);
 }
 
+//+------------------------------------------------------------------+
+//| Draw one supply/demand rectangle                                 |
+//+------------------------------------------------------------------+
 void DrawZones(ENUM_TIMEFRAMES tf,
                string          suffix,
                color           clrD,
@@ -215,47 +152,49 @@ void DrawZones(ENUM_TIMEFRAMES tf,
 {
    datetime nowT  = iTime(_Symbol, tf, 0);
    int      tfSec = GetTFSeconds(tf);
-   datetime extT  = nowT + tfSec * ZoneDurationBars;
+   datetime extT  = nowT + tfSec * Alfred.supdemZoneDurationBars;
 
-   //— Demand
-   int idxL = iLowest(_Symbol, tf, MODE_LOW, ZoneLookback, 1);
+   // Demand
+   int idxL = iLowest(_Symbol, tf, MODE_LOW, Alfred.supdemZoneLookback, 1);
    if(idxL >= 0)
    {
-      datetime t0   = iTime(_Symbol, tf, idxL);
-      double lowP   = iLow (_Symbol, tf, idxL);
-      double highP  = iHigh(_Symbol, tf, idxL);
-      double dist   = (SymbolInfoDouble(_Symbol,SYMBOL_BID) - highP)/_Point;
-      if(dist >= MinImpulseMovePips
-      && !IsZoneBroken(tf, t0, highP, lowP, true)
-      && !IsZoneExpired(tf, t0))
-         DrawRect("DZone_"+suffix, t0, highP, extT, lowP, clrD, isLTF);
-      else
-         ObjectDelete(0, "DZone_"+suffix);
+      datetime t0    = iTime(_Symbol, tf, idxL);
+      double   lowP  = iLow (_Symbol, tf, idxL);
+      double   highP = iHigh(_Symbol, tf, idxL);
+      double   dist  = (SymbolInfoDouble(_Symbol,SYMBOL_BID) - highP)/_Point;
+
+      bool ok = (dist >= Alfred.supdemMinImpulseMovePips)
+                && (!Alfred.supdemEnableBreakoutRemoval || !IsZoneBroken(tf,t0,highP,lowP,true))
+                && (!Alfred.supdemEnableTimeDecay     || !IsZoneExpired(tf,t0));
+      if(ok) DrawRect("DZone_" + suffix, t0, highP, extT, lowP, clrD, isLTF);
+      else   ObjectDelete(0, "DZone_" + suffix);
    }
 
-   //— Supply
-   int idxH = iHighest(_Symbol, tf, MODE_HIGH, ZoneLookback, 1);
+   // Supply
+   int idxH = iHighest(_Symbol, tf, MODE_HIGH, Alfred.supdemZoneLookback, 1);
    if(idxH >= 0)
    {
-      datetime t0   = iTime(_Symbol, tf, idxH);
-      double highP  = iHigh(_Symbol, tf, idxH);
-      double lowP   = iLow (_Symbol, tf, idxH);
-      double dist   = (lowP - SymbolInfoDouble(_Symbol,SYMBOL_BID))/_Point;
-      if(dist >= MinImpulseMovePips
-      && !IsZoneBroken(tf, t0, highP, lowP, false)
-      && !IsZoneExpired(tf, t0))
-         DrawRect("SZone_"+suffix, t0, lowP, extT, highP, clrS, isLTF);
-      else
-         ObjectDelete(0, "SZone_"+suffix);
+      datetime t0    = iTime(_Symbol, tf, idxH);
+      double   highP = iHigh(_Symbol, tf, idxH);
+      double   lowP  = iLow (_Symbol, tf, idxH);
+      double   dist  = (lowP - SymbolInfoDouble(_Symbol,SYMBOL_BID))/_Point;
+
+      bool ok = (dist >= Alfred.supdemMinImpulseMovePips)
+                && (!Alfred.supdemEnableBreakoutRemoval || !IsZoneBroken(tf,t0,highP,lowP,false))
+                && (!Alfred.supdemEnableTimeDecay     || !IsZoneExpired(tf,t0));
+      if(ok) DrawRect("SZone_" + suffix, t0, lowP, extT, highP, clrS, isLTF);
+      else   ObjectDelete(0, "SZone_" + suffix);
    }
 }
 
 //+------------------------------------------------------------------+
-//| Rectangle drawer                                                |
+//| Rectangle drawer                                                 |
 //+------------------------------------------------------------------+
 void DrawRect(string name,
-              datetime t1, double p1,
-              datetime t2, double p2,
+              datetime t1,
+              double   p1,
+              datetime t2,
+              double   p2,
               color    clr,
               bool     borderOnly)
 {
@@ -274,59 +213,56 @@ void DrawRect(string name,
 }
 
 //+------------------------------------------------------------------+
-//| Breakout removal                                                 |
+//| Zone “breakout” detection                                        |
 //+------------------------------------------------------------------+
 bool IsZoneBroken(ENUM_TIMEFRAMES tf,
-                  datetime       tBase,
-                  double         hiP,
-                  double         loP,
-                  bool           isDemand)
+                  datetime        tBase,
+                  double          hiP,
+                  double          loP,
+                  bool            isDemand)
 {
-   if(!EnableBreakoutRemoval) return false;
+   if(!Alfred.supdemEnableBreakoutRemoval)
+      return false;
 
-   int total    = Bars(_Symbol, tf);
-   int shift    = iBarShift(_Symbol, tf, tBase, false);
-   int checkBars= MathMin(ZoneDurationBars, total - shift);
+   int total     = Bars(_Symbol, tf);
+   int shift     = iBarShift(_Symbol, tf, tBase, false);
+   int checkBars = MathMin(Alfred.supdemZoneDurationBars, total - shift);
 
    for(int i=0; i<checkBars; i++)
    {
-      double c = iClose(_Symbol, tf, shift + i);
-      if(RequireBodyClose)
-      {
-         if(isDemand && c < loP) return true;
-         if(!isDemand && c > hiP) return true;
-      }
-      else
-      {
-         double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-         if(isDemand && bid < loP) return true;
-         if(!isDemand && bid > hiP) return true;
-      }
+      double price = Alfred.supdemRequireBodyClose
+                     ? iClose(_Symbol, tf, shift + i)
+                     : SymbolInfoDouble(_Symbol, SYMBOL_BID);
+
+      if( isDemand && price < loP ) return true;
+      if(!isDemand && price > hiP ) return true;
    }
    return false;
 }
 
 //+------------------------------------------------------------------+
-//| Time-decay cleanup                                              |
+//| Time‐decay cleanup                                               |
 //+------------------------------------------------------------------+
 bool IsZoneExpired(ENUM_TIMEFRAMES tf, datetime tBase)
 {
-   if(!EnableTimeDecay) return false;
+   if(!Alfred.supdemEnableTimeDecay)
+      return false;
+
    int cs = iBarShift(_Symbol, tf, TimeCurrent(), false);
-   int bs = iBarShift(_Symbol, tf, tBase,          false);
-   return (cs - bs) >= TimeDecayBars;
+   int bs = iBarShift(_Symbol, tf, tBase,       false);
+   return (cs - bs) >= Alfred.supdemTimeDecayBars;
 }
 
 //+------------------------------------------------------------------+
-//| Convert TF to seconds                                           |
+//| Convert timeframe to seconds                                     |
 //+------------------------------------------------------------------+
 int GetTFSeconds(ENUM_TIMEFRAMES tf)
 {
    switch(tf)
    {
-      case PERIOD_M1:  return   60;
-      case PERIOD_M5:  return  300;
-      case PERIOD_M15: return  900;
+      case PERIOD_M1:  return 60;
+      case PERIOD_M5:  return 300;
+      case PERIOD_M15: return 900;
       case PERIOD_M30: return 1800;
       case PERIOD_H1:  return 3600;
       case PERIOD_H4:  return 14400;
@@ -336,111 +272,40 @@ int GetTFSeconds(ENUM_TIMEFRAMES tf)
 }
 
 //+------------------------------------------------------------------+
-//| Draw the floating “magnet” forecast line                        |
+//| Draw combined magnet forecast                                   |
 //+------------------------------------------------------------------+
-void LabelMagnetInfo(string magnetName, double midPrice)
+void DrawMagnetLine()
 {
-   //== Calculate ETA assuming avg bar duration ==
-   double currPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   double distPips = MathAbs(currPrice - midPrice) / _Point;
-   double avgSpeed = 5; // pips per minute, adjustable
-   int etaMinutes = (int)(distPips / avgSpeed);
+   // project strongest Demand & Supply zones
+   string dZones[] = {"DZone_LTF","DZone_H1","DZone_H4","DZone_D1"};
+   string sZones[] = {"SZone_LTF","SZone_H1","SZone_H4","SZone_D1"};
 
-   //== Estimate impulse strength from last 3 candles ==
-   double c1 = iClose(_Symbol, _Period, 1);
-   double o1 = iOpen (_Symbol, _Period, 1);
-   double c2 = iClose(_Symbol, _Period, 2);
-   double o2 = iOpen (_Symbol, _Period, 2);
-   double bodySum = MathAbs(c1 - o1) + MathAbs(c2 - o2);
+   for(int i=0; i< ArraySize(dZones); i++)
+      CalculateMagnetProjection(dZones[i], (i<2 ? _Period : (i==2?PERIOD_H4:PERIOD_D1)));
 
-   string bias = bodySum > 2 * _Point ? "🔼 Strong" : bodySum > _Point ? "➖ Mild" : "🔽 Weak";
-
-   //== Create label name ==
-   string labelName = magnetName + "_Label";
-
-   if(ObjectFind(0, labelName) < 0)
-      ObjectCreate(0, labelName, OBJ_LABEL, 0, 0, 0);
-
-   ObjectSetInteger(0, labelName, OBJPROP_CORNER, CORNER_RIGHT_LOWER);
-   ObjectSetInteger(0, labelName, OBJPROP_FONTSIZE, 9);
-   ObjectSetInteger(0, labelName, OBJPROP_COLOR, clrWhite);
-   ObjectSetInteger(0, labelName, OBJPROP_XDISTANCE, 90);
-   ObjectSetInteger(0, labelName, OBJPROP_YDISTANCE, 20);
-
-   string txt = "🧲 " + magnetName + "\nETA to Midpoint: ~" + IntegerToString(etaMinutes) + "m\nImpulse Bias: " + bias;
-   ObjectSetString(0, labelName, OBJPROP_TEXT, txt);
-}
-//+------------------------------------------------------------------+
-//| Returns midpoint of the strongest zone in a given pool          |
-//+------------------------------------------------------------------+
-double GetZoneMidpoint(string type)
-{
-   // pool of zone object names
-   string pool[];
-   ArrayResize(pool,4);
-   if(type=="Demand")
-   {
-      pool[0]="DZone_LTF";
-      pool[1]="DZone_H1";
-      pool[2]="DZone_H4";
-      pool[3]="DZone_D1";
-   }
-   else
-   {
-      pool[0]="SZone_LTF";
-      pool[1]="SZone_H1";
-      pool[2]="SZone_H4";
-      pool[3]="SZone_D1";
-   }
-
-   double bestScore = -1e9;
-   double bestMid   = EMPTY_VALUE;
-
-   for(int i=0; i<4; i++)
-   {
-      string z = pool[i];
-      if(ObjectFind(0,z) >= 0)
-      {
-double p1 = ObjectGetDouble(0,z,OBJPROP_PRICE,0);
-double p2 = ObjectGetDouble(0,z,OBJPROP_PRICE,1);
-         double mid = (p1 + p2)*0.5;
-         double dist  = MathAbs(SymbolInfoDouble(_Symbol,SYMBOL_BID) - mid);
-         double width = MathAbs(p1 - p2);
-         double score = 1000 - dist/_Point - width/_Point;
-         if(score > bestScore)
-         {
-            bestScore = score;
-            bestMid   = mid;
-         }
-      }
-   }
-   return(bestMid);
+   for(int i=0; i< ArraySize(sZones); i++)
+      CalculateMagnetProjection(sZones[i], (i<2 ? _Period : (i==2?PERIOD_H4:PERIOD_D1)));
 }
 
 //+------------------------------------------------------------------+
-//| Dummy OnCalculate to satisfy the compiler                        |
+//| Dummy OnCalculate to satisfy MT5                                |
 //+------------------------------------------------------------------+
-
 int OnCalculate(const int rates_total,
                 const int prev_calculated,
-                const datetime &time[],
-                const double &open[],
-                const double &high[],
-                const double &low[],
-                const double &close[],
-                const long &tick_volume[],
-                const long &volume[],
-                const int &spread[])
+                const datetime &t[],
+                const double   &o[],
+                const double   &h[],
+                const double   &l[],
+                const double   &c[],
+                const long     &tv[],
+                const long     &v[],
+                const int      &sp[])
 {
-   // Your existing logic here...
+   // redraw every tick
+   DrawAllZones();
+   if(Alfred.supdemEnableMagnetForecast)
+      DrawMagnetLine();
 
-   // Magnet projections — call them here:
-DrawMagnetLine();
-string dZones[] = {"DZone_LTF", "DZone_H1", "DZone_H4", "DZone_D1"};
-string sZones[] = {"SZone_LTF", "SZone_H1", "SZone_H4", "SZone_D1"};
-
-double dMid = ProjectMagnetLine(dZones, "Demand", clrLime);
-double sMid = ProjectMagnetLine(sZones, "Supply", clrTomato);
-   return rates_total;
+   return(rates_total);
 }
 //+------------------------------------------------------------------+
