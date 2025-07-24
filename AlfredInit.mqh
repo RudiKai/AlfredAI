@@ -21,13 +21,13 @@ void InitAlfredDefaults()
    Alfred.enableHUD              = true;
    Alfred.enableCompass          = true;
 
-   // AlertCenter defaults
-   Alfred.enableAlertCenter           = true;
-   Alfred.alertStrongBiasAligned      = true;
-   Alfred.alertDivergence             = true;
-   Alfred.alertZoneEntry              = true;
-   Alfred.alertBiasFlip               = true;
-   Alfred.alertConfidenceThreshold    = 85;
+   // AlertCenter
+   Alfred.enableAlertCenter        = true;
+   Alfred.alertStrongBiasAligned   = true;
+   Alfred.alertDivergence          = true;
+   Alfred.alertZoneEntry           = true;
+   Alfred.alertBiasFlip            = true;
+   Alfred.alertConfidenceThreshold = 85;
 
    // Risk & SL/TP
    Alfred.atrMultiplierSL        = 1.5;
@@ -37,17 +37,17 @@ void InitAlfredDefaults()
    Alfred.sendTelegram           = true;
    Alfred.sendWhatsApp           = false;
 
-   // Future expansion
+   // Expansion
    Alfred.alertSensitivity       = 3;
    Alfred.zoneProximityThreshold = 20;
 
-   // HUD-specific defaults
+   // HUD Layout
    Alfred.enableHUDDiagnostics   = false;
    Alfred.hudCorner              = CORNER_LEFT_UPPER;
    Alfred.hudXOffset             = 10;
    Alfred.hudYOffset             = 20;
 
-   // SupDemCore defaults
+   // SupDemCore
    Alfred.supdemZoneLookback           = 50;
    Alfred.supdemZoneDurationBars       = 15;
    Alfred.supdemMinImpulseMovePips     = 20.0;
@@ -62,8 +62,18 @@ void InitAlfredDefaults()
    Alfred.supdemTimeDecayBars          = 60;
    Alfred.supdemEnableMagnetForecast   = true;
 
-   // Compass-specific defaults
+   // Compass Layout
    Alfred.compassYOffset              = 20;
+
+   // Logging defaults
+   Alfred.logToFile                    = true;
+   Alfred.logFilename                  = "AlfredLog.csv";
+   Alfred.logIncludeATR                = true;
+   Alfred.logIncludeSession            = true;
+   Alfred.logEnableScreenshots         = false;
+   Alfred.screenshotFolder             = "ChartScreenShot";
+   Alfred.screenshotWidth              = 800;
+   Alfred.screenshotHeight             = 600;
 }
 
-#endif
+#endif // __ALFRED_INIT__
