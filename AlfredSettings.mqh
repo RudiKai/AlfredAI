@@ -19,7 +19,7 @@ struct AlfredSettings
    bool  enableHUD;
    bool  enableCompass;
 
-   // AlertCenter settings
+   // AlertCenter
    bool  enableAlertCenter;
    bool  alertStrongBiasAligned;
    bool  alertDivergence;
@@ -35,17 +35,17 @@ struct AlfredSettings
    bool  sendTelegram;
    bool  sendWhatsApp;
 
-   // Future expansion
+   // Expansion
    int   alertSensitivity;
    int   zoneProximityThreshold;
 
-   // HUD-specific layout
+   // HUD Layout
    bool  enableHUDDiagnostics;
    int   hudCorner;
    int   hudXOffset;
    int   hudYOffset;
 
-   // SupDemCore settings
+   // SupDemCore
    int    supdemZoneLookback;
    int    supdemZoneDurationBars;
    double supdemMinImpulseMovePips;
@@ -60,11 +60,21 @@ struct AlfredSettings
    int    supdemTimeDecayBars;
    bool   supdemEnableMagnetForecast;
 
-   // Compass-specific layout
+   // Compass Layout
    int   compassYOffset;
+
+   // Logging (Phase 2)
+   bool   logToFile;
+   string logFilename;
+   bool   logIncludeATR;
+   bool   logIncludeSession;
+   bool   logEnableScreenshots;
+   string screenshotFolder;
+   int    screenshotWidth;
+   int    screenshotHeight;
 };
 
-// global instance
+// global config
 AlfredSettings Alfred;
 
-#endif
+#endif // __ALFRED_SETTINGS__
