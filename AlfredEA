@@ -1,0 +1,30 @@
+#include <AlfredLogger.mqh>
+
+AlfredLogger logger;
+input bool logToFile = true;
+
+int OnInit()
+{
+   Print("🟡 OnInit started");
+
+   if(logToFile)
+   {
+      Print("🟢 Logger init starting");
+      logger.Init();
+      Print("🟢 Logger init complete");
+
+      logger.LogEvent(
+         TimeCurrent(),
+         _Symbol,
+         PERIOD_CURRENT,
+         "InitLog",
+         100.0,
+         SymbolInfoDouble(_Symbol, SYMBOL_ASK)
+      );
+      Print("🟢 LogEvent fired");
+   }
+
+   return INIT_SUCCEEDED;
+}
+
+void OnTick() {}
