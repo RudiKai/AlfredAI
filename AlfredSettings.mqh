@@ -4,6 +4,9 @@
 #ifndef __ALFRED_SETTINGS__
 #define __ALFRED_SETTINGS__
 
+// … somewhere near the top …
+extern SAlfred Alfred;
+
 struct AlfredSettings
 {
    // Display
@@ -78,3 +81,6 @@ struct AlfredSettings
 AlfredSettings Alfred;
 
 #endif // __ALFRED_SETTINGS__
+
+// instantiate the settings object
+SAlfred Alfred;
