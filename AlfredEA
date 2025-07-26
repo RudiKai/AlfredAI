@@ -5,9 +5,14 @@ input bool logToFile = true;
 
 int OnInit()
 {
-   Print("🟡 OnInit started");
+   // sync the EA’s input switch into global settings
+   Alfred.logToFile = logToFile;
 
+   Print("🟡 OnInit started");
    if(logToFile)
+   {
+      logger.Init();
+      // …
    {
       Print("🟢 Logger init starting");
       logger.Init();
