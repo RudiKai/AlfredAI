@@ -1,0 +1,49 @@
+name: AlfredAI CI
+
+on:
+  push:
+    branches: [ main, dev ]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Install MetaTrader 5 Compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mono-devel
+          # Placeholder: install your mql5compiler or use Wine to run MetaEditor CLI
+
+      - name: Compile MQL5 Files
+        run: |
+          find Experts Indicators Scripts Include -type f -name '*.mq5' \
+            -exec mql5compiler compile {} \;
+          find Include -type f -name '*.mqh' \
+            -exec mql5compiler compile {} \;
+
+      - name: Smoke Test EA
+        run: |
+          # Launch a headless tester, feed test-harness.mq5
+          mql5compiler test Experts/test-harness.mq5 --report test-report.log
+
+      - name: Build Guidebook PDF
+        uses: softprops/action-gh-release@v1
+        if: ${{ github.ref == 'refs/heads/main' }}
+        run: |
+          sudo apt-get install -y pandoc texlive-xetex
+          pandoc docs/guidebook/*.md -o artifacts/AlfredAI-Guidebook.pdf --template custom.tex
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: AlfredAI-Build
+          path: |
+            Experts/*.ex5
+            Indicators/*.ex5
+            Scripts/*.ex5
+            artifacts/AlfredAI-Guidebook.pdf
+            test-report.log
