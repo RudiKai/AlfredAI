@@ -6,6 +6,9 @@
 
 #include <AlfredSettings.mqh>
 
+SAlfred Alfred;         // the actual definition
+
+
 void InitAlfredDefaults()
 {
    // Display
