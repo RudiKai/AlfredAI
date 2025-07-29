@@ -12,6 +12,9 @@
 #include <AlfredSettings.mqh>
 #include <AlfredInit.mqh>
 
+SAlfred Alfred;
+
+
 double zoneBuffer[];
 
 //+------------------------------------------------------------------+
