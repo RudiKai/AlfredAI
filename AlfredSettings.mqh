@@ -4,10 +4,8 @@
 #ifndef __ALFRED_SETTINGS__
 #define __ALFRED_SETTINGS__
 
-// … somewhere near the top …
-extern SAlfred Alfred;
-
-struct AlfredSettings
+// struct for all Alfred settings
+struct SAlfred
 {
    // Display
    int   fontSize;
@@ -75,12 +73,9 @@ struct AlfredSettings
    string screenshotFolder;
    int    screenshotWidth;
    int    screenshotHeight;
-};
+};    // ← semicolon added here
 
-// global config
-AlfredSettings Alfred;
+// external declaration of the one global settings object
+extern SAlfred Alfred;
 
 #endif // __ALFRED_SETTINGS__
-
-// instantiate the settings object
-SAlfred Alfred;
