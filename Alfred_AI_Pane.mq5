@@ -4,14 +4,11 @@
 #property indicator_chart_window
 #property strict
 
-
-
 // one dummy buffer/plot to satisfy MQL5
 #property indicator_buffers 1
 #property indicator_plots   1
 #property indicator_type1   DRAW_NONE
 double paneDummy[];
-
 
 // includes
 #include <AlfredSettings.mqh>
@@ -19,12 +16,11 @@ double paneDummy[];
 
 SAlfred Alfred;
 
-
 // Pane styling
 input int    paneXOffset     = 10;
 input int    paneYOffset     = 10;
 input int    paneFontSize    = 12;
-input color  paneTextColor   = clrWhite;
+input color  paneTextColor   = clrWhite; // fallback if needed
 
 // strength thresholds
 input double strongThreshold = 70.0;
@@ -104,7 +100,7 @@ void DrawPaneTimeframeBias()
    {
       string tf        = tfsPane[i];
       int    bias      = GetCompassBias(tf);           // –1,0,+1
-      double strength = GetCompassStrength(tf);        // 0–100
+      double strength  = GetCompassStrength(tf);       // 0–100
 
       // pick emoji
       string emoji = (bias>0 ? "🟢" : bias<0 ? "🔴" : "⚪");
@@ -117,16 +113,34 @@ void DrawPaneTimeframeBias()
       string name  = "Pane_TFBias_"+tf;
       int    yOff  = paneYOffset + i*(paneFontSize+2);
 
+      // get color based on strength
+color labelColor = GetBiasColor((int)strength);
+
+
       ObjectCreate(0, name, OBJ_LABEL, 0, 0, 0);
       ObjectSetInteger(0, name, OBJPROP_CORNER,      CORNER_LEFT_UPPER);
       ObjectSetInteger(0, name, OBJPROP_XDISTANCE,   paneXOffset);
       ObjectSetInteger(0, name, OBJPROP_YDISTANCE,   yOff);
-      ObjectSetInteger(0, name, OBJPROP_COLOR,       paneTextColor);
+      ObjectSetInteger(0, name, OBJPROP_COLOR,       labelColor);
       ObjectSetInteger(0, name, OBJPROP_FONTSIZE,    paneFontSize);
       ObjectSetString (0, name, OBJPROP_TEXT,        text);
       ObjectSetInteger(0, name, OBJPROP_SELECTABLE,  false);
       ObjectSetInteger(0, name, OBJPROP_HIDDEN,      true);
    }
+}
+
+//+------------------------------------------------------------------+
+//| Color logic based on strength                                    |
+//+------------------------------------------------------------------+
+color GetBiasColor(int bias)
+{
+   if (bias > 70) return clrLime;         // Strong Bullish
+   if (bias > 30) return clrGreen;        // Mild Bullish
+   if (bias > 10) return clrDarkGreen;    // Weak Bullish
+   if (bias < -70) return clrRed;         // Strong Bearish
+   if (bias < -30) return clrOrangeRed;   // Mild Bearish
+   if (bias < -10) return clrFireBrick;   // Weak Bearish
+   return clrGray;                        // Neutral
 }
 
 //+------------------------------------------------------------------+
