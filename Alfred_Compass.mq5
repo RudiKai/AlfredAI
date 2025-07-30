@@ -111,8 +111,12 @@ void OnTimer()
 //+------------------------------------------------------------------+
 //| Stub – return –1,0,+1 based on your bias logic                   |
 //+------------------------------------------------------------------+
-int GetCompassBias(string timeframe)
-{
-   // TODO: integrate your market‐bias calculation here
-   return(0);
+int GetCompassBias(string timeframe) {
+  // Example logic
+  if(timeframe == "H1") {
+    return(1);
+  } else if(timeframe == "M15") {
+    return(-1);
+  }
+  return(0);
 }
