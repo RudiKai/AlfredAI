@@ -130,19 +130,26 @@ void DrawPaneTimeframeBias()
 }
 
 //+------------------------------------------------------------------+
-//| Stub – return –1,0,+1 for bias.                                  |
+//| Simulated bias: cycles through -1, 0, +1                         |
 //+------------------------------------------------------------------+
 int GetCompassBias(string timeframe)
 {
-   // TODO: hook into your bias logic
-   return(0);
+   static int bias = -1;
+
+   // Cycle bias every call: -1 → 0 → +1 → -1 ...
+   bias++;
+   if (bias > 1)
+      bias = -1;
+
+   return bias;
 }
 
 //+------------------------------------------------------------------+
-//| Stub – return 0–100 for strength.                                |
+//| Simulated strength: random value between 0 and 100               |
 //+------------------------------------------------------------------+
 double GetCompassStrength(string timeframe)
 {
-   // TODO: hook into your strength logic
-   return(0.0);
+   // Generate pseudo-random strength
+   double strength = MathRand() % 101; // 0 to 100
+   return strength;
 }
