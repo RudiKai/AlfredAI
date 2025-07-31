@@ -1,0 +1,165 @@
+//+------------------------------------------------------------------+
+//|                                       AlfredBiasBot_VolFilter.mq5|
+//|   MA‐Cross + ATR Filter + Session Auto‐Close (08:00–17:00)        |
+//+------------------------------------------------------------------+
+#property strict
+#include <Trade\Trade.mqh>
+CTrade trade;
+
+//--- Input parameters
+input int             FastMAPeriod = 50;           // Fast MA period
+input int             SlowMAPeriod = 200;          // Slow MA period
+input int             ATRPeriod    = 14;           // ATR period
+input ENUM_TIMEFRAMES Timeframe    = PERIOD_M15;    // Chart timeframe
+input int             StartHour    = 8;            // Trading window start (inclusive)
+input int             EndHour      = 17;           // Trading window end (inclusive)
+input double          LotSize      = 0.10;         // Trade size (lots)
+input double          ATRThreshold = 0.00080;      // Minimum ATR to allow new trades
+
+//--- Indicator handles
+int hMAFast = INVALID_HANDLE;
+int hMASlow = INVALID_HANDLE;
+int hATR    = INVALID_HANDLE;
+
+//--- New‐bar guard
+datetime lastBarTime = 0;
+
+//+------------------------------------------------------------------+
+//| Expert initialization                                           |
+//+------------------------------------------------------------------+
+int OnInit()
+{
+   // Create indicator handles
+   hMAFast = iMA(_Symbol, Timeframe, FastMAPeriod, 0, MODE_SMA, PRICE_CLOSE);
+   hMASlow = iMA(_Symbol, Timeframe, SlowMAPeriod, 0, MODE_SMA, PRICE_CLOSE);
+   hATR    = iATR(_Symbol, Timeframe, ATRPeriod);
+
+   if(hMAFast==INVALID_HANDLE || hMASlow==INVALID_HANDLE || hATR==INVALID_HANDLE)
+   {
+      Print("❌ Failed to create one or more indicator handles");
+      return INIT_FAILED;
+   }
+
+   PrintFormat("✅ Initialized: MA[%d│%d], ATR[%d], Window[%02d–%02d], ATR≥%.5f",
+               FastMAPeriod, SlowMAPeriod, ATRPeriod,
+               StartHour, EndHour, ATRThreshold);
+   return INIT_SUCCEEDED;
+}
+
+//+------------------------------------------------------------------+
+//| Expert deinitialization                                         |
+//+------------------------------------------------------------------+
+void OnDeinit(const int reason)
+{
+   if(hMAFast != INVALID_HANDLE) IndicatorRelease(hMAFast);
+   if(hMASlow != INVALID_HANDLE) IndicatorRelease(hMASlow);
+   if(hATR    != INVALID_HANDLE) IndicatorRelease(hATR);
+   Print("ℹ️ Deinitialized");
+}
+
+//+------------------------------------------------------------------+
+//| OnTick: run once per new closed bar                             |
+//+------------------------------------------------------------------+
+void OnTick()
+{
+   // 1) New‐bar guard
+   datetime barTime = iTime(_Symbol, Timeframe, 0);
+   if(barTime == lastBarTime) 
+      return;
+   lastBarTime = barTime;
+
+   // 2) Extract bar hour
+   MqlDateTime dt;
+   TimeToStruct(barTime, dt);
+
+   // 3) Auto‐close after EndHour
+   if(dt.hour > EndHour)
+   {
+      if(PositionSelect(_Symbol))
+      {
+         PrintFormat("⏱ %s  H%02d > %02d → session ended, closing position",
+                     TimeToString(barTime, TIME_DATE|TIME_MINUTES),
+                     dt.hour, EndHour);
+         trade.PositionClose(_Symbol);
+      }
+      return;
+   }
+
+   // 4) Skip before StartHour
+   if(dt.hour < StartHour)
+   {
+      PrintFormat("⏱ %s  H%02d < %02d → outside trading window",
+                  TimeToString(barTime, TIME_DATE|TIME_MINUTES),
+                  dt.hour, StartHour);
+      return;
+   }
+
+   // 5) Fetch indicator values
+   double maFastArr[1], maSlowArr[1], atrArr[1];
+   if(CopyBuffer(hMAFast, 0, 1, 1, maFastArr) < 1 ||
+      CopyBuffer(hMASlow, 0, 1, 1, maSlowArr) < 1 ||
+      CopyBuffer(hATR,    0, 1, 1, atrArr)    < 1)
+   {
+      Print("❌ CopyBuffer failed");
+      return;
+   }
+   double maFast = maFastArr[0];
+   double maSlow = maSlowArr[0];
+   double atr    = atrArr[0];
+   double price  = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+
+   // 6) ATR volatility filter
+   if(atr < ATRThreshold)
+   {
+      PrintFormat("⚠️ ATR=%.5f below threshold %.5f → skipping bar",
+                  atr, ATRThreshold);
+      return;
+   }
+
+   // 7) MA‐cross detection
+   bool crossBull = (price > maFast && price > maSlow);
+   bool crossBear = (price < maFast && price < maSlow);
+
+   // 8) Debug print
+   PrintFormat("📊 %s  H%02d  Price=%.5f  MA%d=%.5f  MA%d=%.5f  ATR=%.5f  Bull=%d Bear=%d",
+               TimeToString(barTime, TIME_DATE|TIME_MINUTES),
+               dt.hour,
+               price,
+               FastMAPeriod, maFast,
+               SlowMAPeriod, maSlow,
+               atr,
+               crossBull?1:0, crossBear?1:0);
+
+   // 9) Exit on opposite cross
+   if(PositionSelect(_Symbol))
+   {
+      int posType = (int)PositionGetInteger(POSITION_TYPE);
+      if(posType == POSITION_TYPE_BUY && crossBear)
+      {
+         Print(">>> Exiting LONG");
+         trade.PositionClose(_Symbol);
+         return;
+      }
+      if(posType == POSITION_TYPE_SELL && crossBull)
+      {
+         Print(">>> Exiting SHORT");
+         trade.PositionClose(_Symbol);
+         return;
+      }
+   }
+   // 10) Entry on fresh cross
+   else
+   {
+      if(crossBull)
+      {
+         Print(">>> Placing BUY");
+         trade.Buy(LotSize);
+      }
+      else if(crossBear)
+      {
+         Print(">>> Placing SELL");
+         trade.Sell(LotSize);
+      }
+   }
+}
+//+------------------------------------------------------------------+
