@@ -1,0 +1,377 @@
+//+------------------------------------------------------------------+
+//|         AlfredBiasBot_LocalTime_v4.1_Optimized.mq5               |
+//|                                                                  |
+//| Description:                                                     |
+//| This version is a complete refactor of v3 for performance,       |
+//| readability, and robustness. It uses modern MQL5 practices,      |
+//| separates logic into functions, and reduces redundant checks.    |
+//|                                                                  |
+//| v4.1 Changelog:                                                  |
+//| - Fixed critical bug in time session logic where sessions        |
+//|   crossing midnight (e.g., 22:00-05:00) were never detected.     |
+//| - Reworked IsTradingSession() to be the single source of truth.  |
+//| - Simplified the 'isOvernight' flag to be the inverse of the     |
+//|   session status, making the logic more robust.                  |
+//+------------------------------------------------------------------+
+
+#property strict
+#property version   "4.1"
+#property description "MA Bias Bot with ATR filter and advanced time management. Optimized."
+
+#include <Trade\Trade.mqh>
+
+//--- Global objects and variables
+CTrade trade;
+string expertName;
+
+//--- Inputs
+input group "--- Trading Logic ---"
+input int               FastMAPeriod       = 50;          // Fast MA period
+input int               SlowMAPeriod       = 151;         // Slow MA period
+input int               ATRPeriod          = 14;          // ATR period
+input ENUM_TIMEFRAMES   Timeframe          = PERIOD_M15;    // Chart timeframe for signals
+input double            LotSize            = 0.10;        // Fixed lot size
+input double            ATRThreshold       = 0.00060;     // Minimum ATR value to trade
+
+input group "--- Time Settings (Local PC Time) ---"
+input int               StartHour          = 1;           // Trading session start hour
+input int               EndHour            = 23;          // Trading session end hour
+input int               EndMinute          = 30;          // Trading session end minute
+input int               FridayCloseHour    = 22;          // Hour to close all trades on Friday
+
+input group "--- Position Management (Pips) ---"
+input int               BreakEvenPips      = 40;          // Pips in profit to move SL to Break-Even
+input int               TrailingStartPips  = 60;          // Pips in profit to start the session trail (BE + extra)
+input int               TrailingStopPips   = 20;          // Trailing stop distance during session
+input int               OvernightTrailPips = 15;          // Tighter trailing stop distance for overnight positions
+
+input group "--- Miscellaneous ---"
+input ulong             MagicNumber        = 1337;        // Magic number for orders
+input bool              EnableLogging      = true;        // Enable detailed logging (slows backtests)
+
+//--- Indicator handles
+int hMAFast = INVALID_HANDLE;
+int hMASlow = INVALID_HANDLE;
+int hATR    = INVALID_HANDLE;
+
+//--- Globals for efficiency
+datetime _lastBarTime = 0;
+double   _pipValue;
+string   _symbol;
+
+//+------------------------------------------------------------------+
+//| Forward declarations of functions                              |
+//+------------------------------------------------------------------+
+void CheckForNewTrades(const MqlDateTime &localTime, bool isInSession);
+void ManageOpenPositions(const MqlDateTime &localTime, bool isOvernight);
+bool IsTradingSession(const MqlDateTime &time);
+void HandleTrailingStop(ulong ticket, long type, double openPrice, double currentSL, double currentPrice, bool isOvernight);
+
+//+------------------------------------------------------------------+
+//| Expert initialization function                                   |
+//+------------------------------------------------------------------+
+int OnInit()
+{
+    //--- Initialize global variables
+    _symbol = _Symbol;
+    expertName = MQLInfoString(MQL_PROGRAM_NAME);
+    trade.SetExpertMagicNumber(MagicNumber);
+    trade.SetMarginMode(); // Use account's default margin mode
+    
+    //--- Calculate pip value for the current symbol
+    _pipValue = SymbolInfoDouble(_symbol, SYMBOL_POINT) * (SymbolInfoInteger(_symbol, SYMBOL_DIGITS) % 2 != 0 ? 10 : 1);
+    if(_pipValue == 0)
+    {
+        PrintFormat("%s: Failed to calculate Pip value for %s", expertName, _symbol);
+        return(INIT_FAILED);
+    }
+
+    //--- Create indicator handles
+    hMAFast = iMA(_symbol, Timeframe, FastMAPeriod, 0, MODE_SMA, PRICE_CLOSE);
+    hMASlow = iMA(_symbol, Timeframe, SlowMAPeriod, 0, MODE_SMA, PRICE_CLOSE);
+    hATR    = iATR(_symbol, Timeframe, ATRPeriod);
+
+    if(hMAFast == INVALID_HANDLE || hMASlow == INVALID_HANDLE || hATR == INVALID_HANDLE)
+    {
+        PrintFormat("%s: ❌ Failed to create indicator handles. Error: %d", expertName, GetLastError());
+        return(INIT_FAILED);
+    }
+
+    PrintFormat("%s: ✅ Initialized successfully for %s", expertName, _symbol);
+    PrintFormat("Parameters: MA(%d/%d), ATR(%d), Session(%02d:00-%02d:%02d), BE@%dp, TS@%dp/%dp",
+        FastMAPeriod, SlowMAPeriod, ATRPeriod, StartHour, EndHour, EndMinute,
+        BreakEvenPips, TrailingStopPips, OvernightTrailPips);
+        
+    return(INIT_SUCCEEDED);
+}
+
+//+------------------------------------------------------------------+
+//| Expert deinitialization function                                 |
+//+------------------------------------------------------------------+
+void OnDeinit(const int reason)
+{
+    //--- Release resources
+    IndicatorRelease(hMAFast);
+    IndicatorRelease(hMASlow);
+    IndicatorRelease(hATR);
+    PrintFormat("%s: ℹ️ Deinitialized. Reason code: %d", expertName, reason);
+}
+
+//+------------------------------------------------------------------+
+//| Expert tick function (main loop)                                 |
+//+------------------------------------------------------------------+
+void OnTick()
+{
+    //--- 1. New Bar Check: Only run logic once per bar for efficiency
+    datetime currentBarTime = iTime(_symbol, Timeframe, 0);
+    if(currentBarTime == _lastBarTime)
+        return;
+    _lastBarTime = currentBarTime;
+
+    //--- 2. Time Check & Session Determination
+    MqlDateTime localTime;
+    TimeToStruct(TimeLocal(), localTime);
+    
+    bool isInSession = IsTradingSession(localTime);
+    bool isOvernight = !isInSession; // Overnight is simply when not in session
+
+    if(EnableLogging)
+    {
+        PrintFormat("▶ New Bar: %s | Local: %s — In Session: %s | Overnight: %s",
+            TimeToString(currentBarTime, TIME_DATE|TIME_MINUTES),
+            TimeToString(TimeLocal(), TIME_DATE|TIME_MINUTES),
+            isInSession ? "YES" : "NO",
+            isOvernight ? "YES" : "NO");
+    }
+
+    //--- 3. Main Logic: Manage existing trades or look for new ones
+    if(PositionsTotal() > 0)
+    {
+        ManageOpenPositions(localTime, isOvernight);
+    }
+    else // No open positions
+    {
+        CheckForNewTrades(localTime, isInSession);
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Checks for and executes new trades.                              |
+//+------------------------------------------------------------------+
+void CheckForNewTrades(const MqlDateTime &localTime, bool isInSession)
+{
+    //--- 1. Session Filter: Only open new trades during the active session
+    if(!isInSession)
+    {
+        if(EnableLogging) Print("— Outside trading session. No new trades.");
+        return;
+    }
+
+    //--- 2. Fetch Indicator Data for the last closed bar (index 1)
+    double maFastArr[1], maSlowArr[1], atrArr[1];
+    if(CopyBuffer(hMAFast, 0, 1, 1, maFastArr) < 1 ||
+       CopyBuffer(hMASlow, 0, 1, 1, maSlowArr) < 1 ||
+       CopyBuffer(hATR,    0, 1, 1, atrArr) < 1)
+    {
+        PrintFormat("%s: ❌ CopyBuffer failed for indicator data.", expertName);
+        return;
+    }
+    double maFast = maFastArr[0];
+    double maSlow = maSlowArr[0];
+    double atr = atrArr[0];
+    
+    //--- 3. ATR Volatility Filter
+    if(atr < ATRThreshold)
+    {
+        if(EnableLogging) PrintFormat("— ATR (%.5f) is below threshold (%.5f). No new trades.", atr, ATRThreshold);
+        return;
+    }
+
+    //--- 4. Signal Logic: Determine bullish or bearish bias
+    double askPrice = SymbolInfoDouble(_symbol, SYMBOL_ASK);
+    double bidPrice = SymbolInfoDouble(_symbol, SYMBOL_BID);
+
+    bool isBullishBias = askPrice > maFast && askPrice > maSlow;
+    bool isBearishBias = bidPrice < maFast && bidPrice < maSlow;
+
+    //--- 5. Execute Trade
+    if(isBullishBias)
+    {
+        if(trade.Buy(LotSize, _symbol, askPrice, 0, 0, "AlfredBiasBot_v4 Buy"))
+        {
+            PrintFormat("✅ BUY opened at %.5f", trade.ResultPrice());
+        }
+        else
+        {
+            PrintFormat("❌ BUY failed. Error: %d - %s", trade.ResultRetcode(), trade.ResultComment());
+        }
+    }
+    else if(isBearishBias)
+    {
+        if(trade.Sell(LotSize, _symbol, bidPrice, 0, 0, "AlfredBiasBot_v4 Sell"))
+        {
+            PrintFormat("✅ SELL opened at %.5f", trade.ResultPrice());
+        }
+        else
+        {
+            PrintFormat("❌ SELL failed. Error: %d - %s", trade.ResultRetcode(), trade.ResultComment());
+        }
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Manages all open positions for the current symbol.               |
+//+------------------------------------------------------------------+
+void ManageOpenPositions(const MqlDateTime &localTime, bool isOvernight)
+{
+    //--- Loop through all open positions
+    for(int i = PositionsTotal() - 1; i >= 0; i--)
+    {
+        ulong ticket = PositionGetTicket(i);
+        if(PositionGetString(POSITION_SYMBOL) == _symbol && PositionGetInteger(POSITION_MAGIC) == MagicNumber)
+        {
+            long   type      = PositionGetInteger(POSITION_TYPE);
+            double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+            double currentSL = PositionGetDouble(POSITION_SL);
+            double askPrice  = SymbolInfoDouble(_symbol, SYMBOL_ASK);
+            double bidPrice  = SymbolInfoDouble(_symbol, SYMBOL_BID);
+
+            //--- 1. Friday Close Logic
+            if(localTime.day_of_week == FRIDAY && localTime.hour >= FridayCloseHour)
+            {
+                PrintFormat("🔔 Friday close triggered. Closing position #%d.", ticket);
+                trade.PositionClose(ticket);
+                continue; // Move to the next position if any
+            }
+
+            //--- 2. Exit on Reverse Signal
+            double maFastArr[1], maSlowArr[1];
+            CopyBuffer(hMAFast, 0, 1, 1, maFastArr);
+            CopyBuffer(hMASlow, 0, 1, 1, maSlowArr);
+            
+            bool isBullishBias = askPrice > maFastArr[0] && askPrice > maSlowArr[0];
+            bool isBearishBias = bidPrice < maFastArr[0] && bidPrice < maSlowArr[0];
+            
+            if((type == POSITION_TYPE_BUY && isBearishBias) || (type == POSITION_TYPE_SELL && isBullishBias))
+            {
+                PrintFormat(">>> Exit signal on reverse bias. Closing position #%d.", ticket);
+                trade.PositionClose(ticket);
+                continue;
+            }
+
+            //--- 3. Break-Even Logic
+            double beDistance = BreakEvenPips * _pipValue;
+            if(type == POSITION_TYPE_BUY && bidPrice - openPrice >= beDistance && currentSL < openPrice)
+            {
+                if(trade.PositionModify(ticket, openPrice, PositionGetDouble(POSITION_TP)))
+                {
+                    PrintFormat("🚧 BE set for BUY #%d", ticket);
+                    currentSL = openPrice; // Update local SL variable for trailing logic
+                }
+            }
+            else if(type == POSITION_TYPE_SELL && openPrice - askPrice >= beDistance && (currentSL == 0 || currentSL > openPrice))
+            {
+                if(trade.PositionModify(ticket, openPrice, PositionGetDouble(POSITION_TP)))
+                {
+                    PrintFormat("🚧 BE set for SELL #%d", ticket);
+                    currentSL = openPrice; // Update local SL variable for trailing logic
+                }
+            }
+            
+            //--- 4. Trailing Stop Logic
+            double currentPrice = (type == POSITION_TYPE_BUY) ? bidPrice : askPrice;
+            HandleTrailingStop(ticket, type, openPrice, currentSL, currentPrice, isOvernight);
+        }
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Handles all trailing stop logic.                                 |
+//+------------------------------------------------------------------+
+void HandleTrailingStop(ulong ticket, long type, double openPrice, double currentSL, double currentPrice, bool isOvernight)
+{
+    // A stop loss must exist to be trailed (typically set by break-even first)
+    if(currentSL == 0.0) return;
+
+    double newSL = 0.0;
+    
+    if(isOvernight)
+    {
+        // Tighter overnight trailing, starts immediately if profitable
+        double trailDist = OvernightTrailPips * _pipValue;
+        if(type == POSITION_TYPE_BUY && currentPrice - trailDist > currentSL)
+        {
+            newSL = currentPrice - trailDist;
+            if(trade.PositionModify(ticket, newSL, 0.0))
+                PrintFormat("🌙 Overnight Trail BUY #%d -> %.5f", ticket, newSL);
+        }
+        else if(type == POSITION_TYPE_SELL && currentPrice + trailDist < currentSL)
+        {
+            newSL = currentPrice + trailDist;
+            if(trade.PositionModify(ticket, newSL, 0.0))
+                PrintFormat("🌙 Overnight Trail SELL #%d -> %.5f", ticket, newSL);
+        }
+    }
+    else // Regular session trailing
+    {
+        double startTrailingDist = TrailingStartPips * _pipValue;
+        double trailDist = TrailingStopPips * _pipValue;
+        
+        if(type == POSITION_TYPE_BUY && currentPrice - openPrice >= startTrailingDist)
+        {
+            if(currentPrice - trailDist > currentSL)
+            {
+                newSL = currentPrice - trailDist;
+                if(trade.PositionModify(ticket, newSL, 0.0))
+                    PrintFormat("🎯 Session Trail BUY #%d -> %.5f", ticket, newSL);
+            }
+        }
+        else if(type == POSITION_TYPE_SELL && openPrice - currentPrice >= startTrailingDist)
+        {
+            if(currentPrice + trailDist < currentSL)
+            {
+                newSL = currentPrice + trailDist;
+                if(trade.PositionModify(ticket, newSL, 0.0))
+                    PrintFormat("🎯 Session Trail SELL #%d -> %.5f", ticket, newSL);
+            }
+        }
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Checks if the current time is within the allowed trading session.|
+//| This function now correctly handles sessions that cross midnight.|
+//+------------------------------------------------------------------+
+bool IsTradingSession(const MqlDateTime &time)
+{
+    // Disallow trading on weekends
+    if(time.day_of_week == SATURDAY || time.day_of_week == SUNDAY)
+    {
+        return false;
+    }
+
+    int currentTimeInMinutes = time.hour * 60 + time.min;
+    int startTimeInMinutes = StartHour * 60;
+    int endTimeInMinutes = EndHour * 60 + EndMinute;
+
+    // Case 1: Normal session (e.g., 01:00 - 23:30)
+    // Start time is less than end time.
+    if(startTimeInMinutes < endTimeInMinutes)
+    {
+        return (currentTimeInMinutes >= startTimeInMinutes && currentTimeInMinutes < endTimeInMinutes);
+    }
+    // Case 2: Session crosses midnight (e.g., 22:00 - 05:00)
+    // Start time is greater than end time.
+    else if (startTimeInMinutes > endTimeInMinutes)
+    {
+        // Time must be after the start OR before the end.
+        return (currentTimeInMinutes >= startTimeInMinutes || currentTimeInMinutes < endTimeInMinutes);
+    }
+    // Case 3: Session is exactly 24 hours or invalid (start == end).
+    // For safety, we assume not in session to prevent constant trading.
+    else
+    {
+        return false;
+    }
+}
+//+------------------------------------------------------------------+
