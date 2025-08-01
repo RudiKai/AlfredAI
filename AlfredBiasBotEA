@@ -1,231 +1,293 @@
 //+------------------------------------------------------------------+
-//|              AlfredBiasBot_LocalOffset_v5.mq5                   |
-//|  MA50/MA151 + ATR14 + BE@40pips + TS@60pips + OvernightTS@15     |
-//|  Session & overnight based on barTime + TimeOffset (local tz)   |
+//|               AlfredBiasBot_LocalTime_v5.0_Enhanced.mq5         |
+//|  Enhanced version with structured logging, session‐boundary info,|
+//|  indicator snapshots, event codes, and refined time logic.       |
 //+------------------------------------------------------------------+
+//–– declare the name your code expects ––
+string _ProgramName = "AlfredBiasBot";
+
+
 #property strict
+#property version   "5.0"
+#property description "Enhanced AlfredBiasBot with structured logging and refined session logic"
 #include <Trade\Trade.mqh>
-CTrade trade;
+
+#define EVT_INIT  "[INIT]"
+#define EVT_BAR   "[BAR]"
+#define EVT_ENTRY "[ENTRY]"
+#define EVT_EXIT  "[EXIT]"
+#define EVT_TS    "[TS]"
 
 //--- Inputs
-input int      FastMAPeriod       = 50;        // Fast MA period
-input int      SlowMAPeriod       = 151;       // Slow MA period
-input int      ATRPeriod          = 14;        // ATR period
-input ENUM_TIMEFRAMES Timeframe   = PERIOD_M15;// Chart timeframe
-input int      StartHour          = 1;         // Session start hour (local)
-input int      EndHour            = 23;        // Session end hour (local)
-input int      EndMinute          = 30;        // Session end minute (local)
-input int      FridayCloseHour    = 22;        // Friday close hour (local)
-input double   LotSize            = 0.10;      // Trade size (lots)
-input double   ATRThreshold       = 0.00060;   // Minimum ATR filter
-input int      BreakEvenPips      = 40;        // Pips to move SL to break-even
-input int      TrailingStartExtra = 20;        // Extra pips beyond BE to start trailing
-input int      TrailingStopPips   = 20;        // TS distance during session
-input int      OvernightTrailPips = 15;        // TS distance after session
-input int      TimeOffset         = 3;         // Local time = server time + offset hours
+input int      FastMAPeriod       = 50;     // Fast MA period
+input int      SlowMAPeriod       = 151;    // Slow MA period
+input int      ATRPeriod          = 14;     // ATR period
+input ENUM_TIMEFRAMES Timeframe   = PERIOD_M15;
+input double   LotSize            = 0.10;   // Fixed lot size
+input double   ATRThreshold       = 0.00060; // ATR filter
+input int      StartHour          = 1;      // Session start hour (local)
+input int      StartMinute        = 0;      // Session start minute
+input int      EndHour            = 23;     // Session end hour (local)
+input int      EndMinute          = 30;     // Session end minute
+input int      FridayCloseHour    = 22;     // Fri close hour (local)
+input int      BreakEvenPips      = 40;     // Pips to BE
+input int      TrailingStartPips  = 60;     // Pips to start session trail
+input int      TrailingStopPips   = 20;     // Session trail distance
+input int      OvernightTrailPips = 15;     // Overnight trail distance
+input ulong    MagicNumber        = 1337;   // Magic for this EA
+input bool     EnableLogging      = true;   // Verbose logging
 
-//--- Indicator handles & bar guard
-int    hMAFast      = INVALID_HANDLE;
-int    hMASlow      = INVALID_HANDLE;
-int    hATR         = INVALID_HANDLE;
-datetime lastBarTime= 0;
+//--- Globals
+CTrade    trade;
+int       hMAFast = INVALID_HANDLE, hMASlow = INVALID_HANDLE, hATR = INVALID_HANDLE;
+double    pipValue;
+string    symbolName;
+
+input int SessionStartMin  =   5;    // 00:05 → 0*60 +  5
+input int SessionEndMin    = 1435;  // 23:55 → 23*60 +55
 
 //+------------------------------------------------------------------+
 //| Expert initialization                                           |
 //+------------------------------------------------------------------+
 int OnInit()
-{
-   // Create indicators
-   hMAFast = iMA(_Symbol, Timeframe, FastMAPeriod, 0, MODE_SMA, PRICE_CLOSE);
-   hMASlow = iMA(_Symbol, Timeframe, SlowMAPeriod, 0, MODE_SMA, PRICE_CLOSE);
-   hATR    = iATR(_Symbol, Timeframe, ATRPeriod);
-   if(hMAFast==INVALID_HANDLE||hMASlow==INVALID_HANDLE||hATR==INVALID_HANDLE)
-   {
-      Print("❌ Failed to create indicator handles");
+  {
+   symbolName = _Symbol;
+   trade.SetExpertMagicNumber(MagicNumber);
+
+   // compute pip-value
+   pipValue = SymbolInfoDouble(symbolName, SYMBOL_POINT) *
+              ((SymbolInfoInteger(symbolName, SYMBOL_DIGITS) % 2)!=0 ? 10 : 1);
+   if(pipValue<=0.0)
+     {
+      PrintFormat("%s Failed to compute pip value for %s", EVT_INIT, symbolName);
       return(INIT_FAILED);
-   }
-   PrintFormat(
-     "✅ Init: MA[%d/%d] ATR[%d|thr=%.5f] BE=%dp TS+%dp@%dp OTS=%dp  "
-     "Session[%02d:%02d–%02d:%02d] FriClose@%02d Off=%dh",
-     FastMAPeriod,SlowMAPeriod,ATRPeriod,ATRThreshold,
-     BreakEvenPips,TrailingStartExtra,TrailingStopPips,OvernightTrailPips,
-     StartHour,0, EndHour,EndMinute, FridayCloseHour, TimeOffset
-   );
+     }
+
+   // create handles
+   hMAFast = iMA(symbolName, Timeframe, FastMAPeriod, 0, MODE_SMA, PRICE_CLOSE);
+   hMASlow = iMA(symbolName, Timeframe, SlowMAPeriod, 0, MODE_SMA, PRICE_CLOSE);
+   hATR    = iATR(symbolName, Timeframe, ATRPeriod);
+   if(hMAFast==INVALID_HANDLE || hMASlow==INVALID_HANDLE || hATR==INVALID_HANDLE)
+     {
+      PrintFormat("%s ❌ Failed to create indicators (Err=%d)", EVT_INIT, GetLastError());
+      return(INIT_FAILED);
+     }
+
+   // log parameters & boundaries
+   if(EnableLogging)
+     {
+      PrintFormat("%s %s initialized for %s", EVT_INIT, _ProgramName, symbolName);
+      PrintFormat("%s Session boundaries %02d:%02d–%02d:%02d (Min:%d–%d)",
+                  EVT_INIT,
+                  StartHour, StartMinute, EndHour, EndMinute,
+                  StartHour*60 + StartMinute,
+                  EndHour*60   + EndMinute);
+     }
    return(INIT_SUCCEEDED);
-}
+  }
 
 //+------------------------------------------------------------------+
 //| Expert deinitialization                                         |
 //+------------------------------------------------------------------+
 void OnDeinit(const int reason)
-{
+  {
    IndicatorRelease(hMAFast);
    IndicatorRelease(hMASlow);
    IndicatorRelease(hATR);
-   Print("ℹ️ Deinitialized");
-}
+   PrintFormat("%s Deinitialized. Reason=%d", EVT_INIT, reason);
+  }
 
 //+------------------------------------------------------------------+
-//| Expert tick handler                                             |
+//| OnTick: new‐bar guard, logging, pass flags to trade routines    |
 //+------------------------------------------------------------------+
 void OnTick()
-{
-   // 1) New‐bar guard
-   datetime barTime = iTime(_Symbol, Timeframe, 0);
-   if(barTime == lastBarTime) return;
-   lastBarTime = barTime;
+  {
+    static datetime lastBarTime = 0;
 
-   // 2) Server bar struct
-   MqlDateTime dtBar;
-   TimeToStruct(barTime, dtBar);
+    // server time right now
+    datetime nowSrv = TimeTradeServer();
+    if(nowSrv == lastBarTime)
+      return;                // not a new bar yet
+    lastBarTime = nowSrv;
 
-   // 3) Compute local bar time by offset
-   datetime localTs = barTime + TimeOffset * 3600;
-   MqlDateTime dtLocal;
-   TimeToStruct(localTs, dtLocal);
+    // break out struct for easy access
+    MqlDateTime dt; TimeToStruct(nowSrv, dt);
 
-   // 4) Friday gap‐avoidance (local)
-   if(dtLocal.day_of_week == 5 && dtLocal.hour >= FridayCloseHour)
-   {
-      if(PositionSelect(_Symbol))
-      {
-         PrintFormat("🔔 Friday %02d:00 local — closing for weekend", dtLocal.hour);
-         trade.PositionClose(_Symbol);
-      }
+    // calc session flags
+    bool inSession = IsTradingSession();
+    bool overnight = !inSession;
+
+    // logging: shows you exactly what GMT+3 hour:minute & flags
+    if(EnableLogging)
+      PrintFormat(
+        "[BAR] srv=%04d.%02d.%02d %02d:%02d (dow=%d) — InSession=%s | Overnight=%s",
+        dt.year, dt.mon, dt.day,
+        dt.hour, dt.min,
+        dt.day_of_week,
+        inSession  ? "YES" : "NO",
+        overnight ? "YES" : "NO"
+      );
+  }
+//+------------------------------------------------------------------+
+//| Check & execute new entries                                     |
+//+------------------------------------------------------------------+
+void CheckForNewTrades(const MqlDateTime &loc, bool inSession)
+  {
+   if(!inSession)
+     {
+      if(EnableLogging) PrintFormat("%s — Outside session. Skipping entries.", EVT_BAR);
       return;
-   }
+     }
 
-   // 5) Minute‐based session detection
-   int localTotalMin = dtLocal.hour * 60 + dtLocal.min;
-   int sessionStart  = StartHour * 60;              // e.g. 60
-   int sessionEnd    = EndHour * 60 + EndMinute;    // e.g. 1410
-   bool inSession    = (localTotalMin >= sessionStart) && (localTotalMin < sessionEnd);
-   bool overnight    = !inSession;
-
-   // Debug print
-   PrintFormat(
-     "▶ Bar %02d:%02d(srv) | Loc %02d:%02d(min:%4d) — inSession=%s overnight=%s",
-     dtBar.hour, dtBar.min,
-     dtLocal.hour, dtLocal.min, localTotalMin,
-     inSession  ? "YES" : "NO",
-     overnight  ? "YES" : "NO"
-   );
-
-   // 6) Fetch MA & ATR (last closed bar)
-   double maFastArr[1], maSlowArr[1], atrArr[1];
-   if(CopyBuffer(hMAFast, 0, 1, 1, maFastArr) < 1 ||
-      CopyBuffer(hMASlow, 0, 1, 1, maSlowArr) < 1 ||
-      CopyBuffer(hATR,    0, 1, 1, atrArr   ) < 1)
-   {
-      Print("❌ CopyBuffer failed");
+   // fetch indicators on closed bar (index=1)
+   double maF[1], maS[1], atrA[1];
+   if(CopyBuffer(hMAFast,0,1,1,maF)<1 ||
+      CopyBuffer(hMASlow,0,1,1,maS)<1 ||
+      CopyBuffer(hATR,   0,1,1,atrA)<1)
+     {
+      PrintFormat("%s ❌ CopyBuffer failed", EVT_BAR);
       return;
-   }
-   double maFast = maFastArr[0], maSlow = maSlowArr[0], atr = atrArr[0];
-   double price  = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+     }
 
-   // 7) ATR filter
-   if(atr < ATRThreshold) return;
+   double maFast = maF[0], maSlow = maS[0], atr = atrA[0];
+   if(EnableLogging)
+      PrintFormat("   %s Indcs: MA%d=%.5f MA%d=%.5f ATR=%.5f",
+                  EVT_BAR,
+                  FastMAPeriod, maFast,
+                  SlowMAPeriod, maSlow,
+                  atr);
 
-   // 8) MA‐cross signals
-   bool crossBull = (price > maFast && price > maSlow);
-   bool crossBear = (price < maFast && price < maSlow);
+   // ATR filter
+   if(atr < ATRThreshold)
+     {
+      if(EnableLogging)
+         PrintFormat("   %s ATR(%.5f) below threshold(%.5f). No trade.", EVT_BAR, atr, ATRThreshold);
+      return;
+     }
 
-   // 9) Position management
-   if(PositionSelect(_Symbol))
-   {
-      // pip math
-      double pip     = (_Digits==5||_Digits==3) ? _Point*10 : _Point;
-      double beDist  = BreakEvenPips * pip;
-      double tsStart = (BreakEvenPips + TrailingStartExtra) * pip;
-      double tsSess  = TrailingStopPips * pip;
-      double tsOvr   = OvernightTrailPips * pip;
+   // price vs MAs
+   double ask = SymbolInfoDouble(symbolName, SYMBOL_ASK);
+   double bid = SymbolInfoDouble(symbolName, SYMBOL_BID);
+   bool bull = ask>maFast && ask>maSlow;
+   bool bear = bid<maFast && bid<maSlow;
 
-      ulong  ticket = PositionGetInteger(POSITION_TICKET);
-      long   type   = PositionGetInteger(POSITION_TYPE);
-      double entry  = PositionGetDouble(POSITION_PRICE_OPEN);
-      double currSL = PositionGetDouble(POSITION_SL);
-
-      if(inSession)
-      {
-         // Break-even
-         if(type==POSITION_TYPE_BUY && price-entry>=beDist && currSL<entry)
-         {
-            trade.PositionModify(ticket, entry, 0.0);
-            currSL = entry; Print("🚧 BE BUY set");
-         }
-         if(type==POSITION_TYPE_SELL && entry-price>=beDist && (currSL==0||currSL>entry))
-         {
-            trade.PositionModify(ticket, entry, 0.0);
-            currSL = entry; Print("🚧 BE SELL set");
-         }
-         // Session trailing
-         if(currSL>0 && type==POSITION_TYPE_BUY && price-entry>=tsStart)
-         {
-            double newSL = price - tsSess;
-            if(newSL > currSL)
-            {
-               trade.PositionModify(ticket, newSL, 0.0);
-               currSL=newSL; PrintFormat("🎯 Trail BUY→%.5f",newSL);
-            }
-         }
-         if(currSL>0 && type==POSITION_TYPE_SELL && entry-price>=tsStart)
-         {
-            double newSL = price + tsSess;
-            if(newSL < currSL)
-            {
-               trade.PositionModify(ticket, newSL, 0.0);
-               currSL=newSL; PrintFormat("🎯 Trail SELL→%.5f",newSL);
-            }
-         }
-      }
+   // execute
+   if(bull)
+     {
+      if(trade.Buy(LotSize, symbolName, ask, 0, 0, "AlfieBot BUY"))
+         PrintFormat("%s Signal:BULL → BUY @%.5f", EVT_ENTRY, trade.ResultPrice());
       else
-      {
-         // Overnight trailing
-         if(type==POSITION_TYPE_BUY)
-         {
-            double newSL = price - tsOvr;
-            if(newSL > currSL)
-            {
-               trade.PositionModify(ticket, newSL, 0.0);
-               currSL=newSL; PrintFormat("🌙 O/N Trail BUY→%.5f",newSL);
-            }
-         }
-         else
-         {
-            double newSL = price + tsOvr;
-            if(currSL==0 || newSL < currSL)
-            {
-               trade.PositionModify(ticket, newSL, 0.0);
-               currSL=newSL; PrintFormat("🌙 O/N Trail SELL→%.5f",newSL);
-            }
-         }
-      }
+         PrintFormat("%s BUY failed (Err:%d %s)", EVT_ENTRY, trade.ResultRetcode(), trade.ResultComment());
+     }
+   else if(bear)
+     {
+      if(trade.Sell(LotSize, symbolName, bid, 0, 0, "AlfieBot SELL"))
+         PrintFormat("%s Signal:BEAR → SELL @%.5f", EVT_ENTRY, trade.ResultPrice());
+      else
+         PrintFormat("%s SELL failed (Err:%d %s)", EVT_ENTRY, trade.ResultRetcode(), trade.ResultComment());
+     }
+  }
 
-      // Reverse‐cross exit
-      if(type==POSITION_TYPE_BUY && crossBear)
-      {
-         Print(">>> Exit LONG on reverse cross");
-         trade.PositionClose(_Symbol);
-      }
-      if(type==POSITION_TYPE_SELL && crossBull)
-      {
-         Print(">>> Exit SHORT on reverse cross");
-         trade.PositionClose(_Symbol);
-      }
-   }
-   else if(inSession)
-   {
-      // New entries only in-session
-      if(crossBull)
-      {
-         Print(">>> Placing BUY");
-         trade.Buy(LotSize);
-      }
-      else if(crossBear)
-      {
-         Print(">>> Placing SELL");
-         trade.Sell(LotSize);
-      }
-   }
-}
+//+------------------------------------------------------------------+
+//| Manage open positions                                            |
+//+------------------------------------------------------------------+
+void ManageOpenPositions(const MqlDateTime &loc, bool overnight)
+  {
+   double ask = SymbolInfoDouble(symbolName, SYMBOL_ASK);
+   double bid = SymbolInfoDouble(symbolName, SYMBOL_BID);
+
+   for(int i=PositionsTotal()-1; i>=0; i--)
+     {
+      if(PositionGetTicket(i)<=0) continue;
+      if(PositionGetString(POSITION_SYMBOL)!=symbolName) continue;
+      if(PositionGetInteger(POSITION_MAGIC)!=MagicNumber) continue;
+
+      ulong ticket    = PositionGetInteger(POSITION_TICKET);
+      long  type      = PositionGetInteger(POSITION_TYPE);
+      double openP    = PositionGetDouble(POSITION_PRICE_OPEN);
+      double currSL   = PositionGetDouble(POSITION_SL);
+      double currPrice= (type==POSITION_TYPE_BUY ? bid : ask);
+
+      // 1) Friday close
+      if(loc.day_of_week==FRIDAY && loc.hour>=FridayCloseHour)
+        {
+         PrintFormat("%s Fri-close → closing #%d", EVT_EXIT, ticket);
+         trade.PositionClose(ticket);
+         continue;
+        }
+
+      // 2) Reverse-bias exit
+      double maF[1], maS[1];
+      CopyBuffer(hMAFast,0,1,1,maF);
+      CopyBuffer(hMASlow,0,1,1,maS);
+      bool bull = ask>maF[0] && ask>maS[0];
+      bool bear = bid<maF[0] && bid<maS[0];
+      if((type==POSITION_TYPE_BUY && bear) || (type==POSITION_TYPE_SELL && bull))
+        {
+         PrintFormat("%s Reverse signal → closing #%d", EVT_EXIT, ticket);
+         trade.PositionClose(ticket);
+         continue;
+        }
+
+      // 3) Break-even
+      double beDist = BreakEvenPips * pipValue;
+      if(type==POSITION_TYPE_BUY && bid-openP>=beDist && currSL<openP)
+         if(trade.PositionModify(ticket, openP, 0))
+            { currSL=openP; PrintFormat("%s BE BUY #%d", EVT_TS, ticket); }
+      else if(type==POSITION_TYPE_SELL && openP-ask>=beDist && (currSL==0||currSL>openP))
+         if(trade.PositionModify(ticket, openP, 0))
+            { currSL=openP; PrintFormat("%s BE SELL #%d", EVT_TS, ticket); }
+
+      // 4) Trailing stop
+      HandleTrailingStop(ticket, type, openP, currSL, currPrice, overnight);
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| Trailing-stop logic                                              |
+//+------------------------------------------------------------------+
+void HandleTrailingStop(ulong ticket,long type,double openP,double currSL,double currPrice,bool overnight)
+  {
+   if(currSL<=0.0) return;
+
+   double trailDist = (overnight ? OvernightTrailPips : TrailingStopPips) * pipValue;
+   double startDist = TrailingStartPips * pipValue;
+   double newSL     = currSL;
+
+   // condition to start trailing
+   bool canTrail = (overnight || 
+                    (type==POSITION_TYPE_BUY && currPrice-openP>=startDist) ||
+                    (type==POSITION_TYPE_SELL && openP-currPrice>=startDist));
+   if(!canTrail) return;
+
+   if(type==POSITION_TYPE_BUY && currPrice-trailDist>currSL)
+      newSL = currPrice-trailDist;
+   else if(type==POSITION_TYPE_SELL && currPrice+trailDist<currSL)
+      newSL = currPrice+trailDist;
+
+   if(newSL!=currSL)
+      if(trade.PositionModify(ticket, newSL, 0))
+         PrintFormat("%s %s Trail #%d → %.5f",
+                     EVT_TS,
+                     (overnight?"O/N":"Session"),
+                     ticket, newSL);
+  }
+
+//+------------------------------------------------------------------+
+//| Is it Mon–Fri between 00:05 and 23:55 server time (GMT+3)?       |
+//+------------------------------------------------------------------+
+bool IsTradingSession()
+  {
+    datetime nowSrv = TimeTradeServer();
+    MqlDateTime dt; TimeToStruct(nowSrv, dt);
+
+    // Only Monday–Friday
+    if(dt.day_of_week < MONDAY || dt.day_of_week > FRIDAY)
+      return false;
+
+    // Total minutes since midnight
+    int curMin = dt.hour*60 + dt.min;
+
+    return (curMin >= SessionStartMin && curMin < SessionEndMin);
+  }
 //+------------------------------------------------------------------+
