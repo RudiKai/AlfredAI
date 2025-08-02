@@ -1,0 +1,163 @@
+//+------------------------------------------------------------------+
+//|             EnhancedBiasBot_with_BEOffset.mq5                    |
+//|  Adds BE offset, partial close, ATR stop option, plus existing   |
+//|  EMA crossover, TP, TS, time-exit and stop-level protection.     |
+//+------------------------------------------------------------------+
+#include <Trade\Trade.mqh>
+#include <Indicators\Indicators.mqh>
+
+input int     FastMAPeriod       = 10;      // Fast EMA period
+input int     SlowMAPeriod       = 30;      // Slow EMA period
+input double  TestLots           = 0.10;    // Lot size for entries
+input int     MinBarsBetween     = 12;      // Min bars between trades
+input int     MaxBarsHeld        = 20;      // Max bars before forced close
+input int     TakeProfitPips     = 25;      // Fixed TP (pips)
+input int     BreakEvenTrigger   = 15;      // Profit to trigger BE (pips)
+input int     BreakEvenOffset    = 2;       // Move SL BETrigger+offset (pips)
+input int     TrailingStartPips  = 20;      // Trailing start (pips)
+input int     TrailingStopPips   = 5;       // Trailing distance (pips)
+input bool    UseATRStop         = false;   // Switch to ATR-based stop
+input int     ATRPeriod          = 14;      // ATR period if UseATRStop
+input double  ATRMultiplier      = 1.5;     // ATR × multiplier for SL
+
+CTrade        trade;
+int           fastHandle, slowHandle, atrHandle;
+uint          minStopLevel;
+double        pipValue;
+datetime      lastTradeTime = 0, lastBarTime = 0;
+
+struct OrderData {
+  bool    partialTaken;
+  double  entryPrice;
+};
+OrderData      od = { false, 0.0 };
+
+//+------------------------------------------------------------------+
+//| Expert initialization                                           |
+//+------------------------------------------------------------------+
+int OnInit()
+{
+  fastHandle = iMA(_Symbol,_Period,FastMAPeriod,0,MODE_EMA,PRICE_CLOSE);
+  slowHandle = iMA(_Symbol,_Period,SlowMAPeriod,0,MODE_EMA,PRICE_CLOSE);
+  if(UseATRStop)
+    atrHandle = iATR(_Symbol,_Period,ATRPeriod);
+  if(fastHandle<0 || slowHandle<0 || (UseATRStop && atrHandle<0))
+    return INIT_FAILED;
+
+  pipValue     = _Point * ((SymbolInfoInteger(_Symbol,SYMBOL_DIGITS)==5)?10:1);
+  minStopLevel = (uint)SymbolInfoInteger(_Symbol,SYMBOL_TRADE_STOPS_LEVEL);
+
+  trade.SetTypeFilling(ORDER_FILLING_FOK);
+  
+  PrintFormat("✅ Init: EMA(%d/%d) TP=%dp BEtrig=%dp BEoff=%dp TSstart=%dp TSdist=%dp MinBars=%d MaxBars=%d ATRstop=%s",
+              FastMAPeriod, SlowMAPeriod, TakeProfitPips,
+              BreakEvenTrigger, BreakEvenOffset,
+              TrailingStartPips, TrailingStopPips,
+              MinBarsBetween, MaxBarsHeld,
+              UseATRStop?"ON":"OFF");
+  return INIT_SUCCEEDED;
+}
+
+//+------------------------------------------------------------------+
+//| New tick handler                                                |
+//+------------------------------------------------------------------+
+void OnTick()
+{
+  datetime curBar = iTime(_Symbol,_Period,0);
+  if(curBar == lastBarTime) return;
+  lastBarTime = curBar;
+
+  ManagePosition();
+  TryEntry();
+}
+
+//+------------------------------------------------------------------+
+//| Entry on EMA crossover                                          |
+//+------------------------------------------------------------------+
+void TryEntry()
+{
+  if(PositionSelect(_Symbol)) return;
+  if(lastTradeTime>0 && TimeCurrent()-lastTradeTime < MinBarsBetween*_Period*60)
+    return;
+
+  double fe[3], se[3];
+  if(CopyBuffer(fastHandle,0,0,3,fe)!=3 || CopyBuffer(slowHandle,0,0,3,se)!=3)
+    return;
+
+  if(fe[2]<se[2] && fe[1]>se[1])
+  {
+    double ask = SymbolInfoDouble(_Symbol,SYMBOL_ASK);
+    double baseSL = ask - TakeProfitPips*pipValue;  // using TP as initial R
+    double sl = UseATRStop
+                ? ask - (iATR(_Symbol,_Period,ATRPeriod,0)*ATRMultiplier)
+                : baseSL;
+    sl = NormalizeDouble(sl - (minStopLevel*_Point), _Digits);
+    double tp = NormalizeDouble(ask + TakeProfitPips*pipValue, _Digits);
+
+    if(trade.Buy(TestLots, _Symbol, ask, sl, tp, "EnhancedBias"))
+    {
+      od = { false, ask };
+      lastTradeTime = TimeCurrent();
+      PrintFormat("[ENTRY] BUY @%.5f SL=%.5f TP=%.5f", ask, sl, tp);
+    }
+    else
+      PrintFormat("[ENTRY-ERR] code=%d", trade.ResultRetcode());
+  }
+}
+
+//+------------------------------------------------------------------+
+//| Manage Stop-levels, BE, Partial close, TS, Time-exit            |
+//+------------------------------------------------------------------+
+void ManagePosition()
+{
+  if(!PositionSelect(_Symbol)) return;
+
+  ulong  ticket   = PositionGetTicket(0);
+  double entry    = PositionGetDouble(POSITION_PRICE_OPEN);
+  ENUM_POSITION_TYPE type = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+  double curPrice = type==POSITION_TYPE_BUY
+                    ? SymbolInfoDouble(_Symbol,SYMBOL_BID)
+                    : SymbolInfoDouble(_Symbol,SYMBOL_ASK);
+  int    profitPips = int(((curPrice - entry)/_Point)*(type==POSITION_TYPE_BUY?1:-1));
+  double curSL     = PositionGetDouble(POSITION_SL);
+  double curTP     = PositionGetDouble(POSITION_TP);
+  int    barsHeld  = int((TimeCurrent()-PositionGetInteger(POSITION_TIME)) / (_Period*60));
+
+  // Partial profit @1:1 R
+  if(!od.partialTaken && profitPips >= TakeProfitPips)
+  {
+    double vol   = PositionGetDouble(POSITION_VOLUME);
+    trade.PositionClosePartial(ticket, vol/2.0);
+    od.partialTaken = true;
+    PrintFormat("[PARTIAL] Closed half at +%dpips", profitPips);
+  }
+
+  // Move SL to BE+offset
+  if(profitPips >= BreakEvenTrigger && curSL < od.entryPrice + BreakEvenOffset*pipValue)
+  {
+    double newSL = NormalizeDouble(od.entryPrice + BreakEvenOffset*pipValue, _Digits);
+    if(trade.PositionModify(ticket, newSL, curTP))
+      PrintFormat("[BE] SL→%.5f (+%dpips offset)", newSL, BreakEvenOffset);
+    else
+      PrintFormat("[BE-ERR] code=%d", trade.ResultRetcode());
+  }
+
+  // Standard Trailing Stop
+  if(profitPips >= TrailingStartPips)
+  {
+    double candSL = type==POSITION_TYPE_BUY
+                    ? curPrice - TrailingStopPips*pipValue
+                    : curPrice + TrailingStopPips*pipValue;
+    candSL = NormalizeDouble(candSL, _Digits);
+    if(type==POSITION_TYPE_BUY ? candSL>curSL : candSL<curSL)
+      if(trade.PositionModify(ticket, candSL, curTP))
+        PrintFormat("[TS] SL→%.5f", candSL);
+  }
+
+  // Time-based exit
+  if(barsHeld >= MaxBarsHeld)
+    if(trade.PositionClose(ticket))
+      PrintFormat("[TIME EXIT] after %d bars", barsHeld);
+}
+
+//+------------------------------------------------------------------+
