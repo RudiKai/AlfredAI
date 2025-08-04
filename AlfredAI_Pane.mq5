@@ -10,6 +10,7 @@
 
 // --- Includes
 #include <ChartObjects\ChartObjectsTxtControls.mqh>
+#include "AlfredAlertCenter_Include.mqh" // <-- NEW: Integration with AlertCenter
 
 // --- Enums for State Management (Clean & Safe)
 enum ENUM_BIAS
@@ -27,23 +28,22 @@ enum ENUM_ZONE
 };
 
 // --- Structs for Data Handling
-struct TradeSetup
+// This struct holds data about an active trade
+struct LiveTradeData
 {
+    bool   trade_exists;
     double entry;
     double sl;
     double tp;
-    bool   is_ready;
 
-    // Copy constructor to resolve compiler warning
-    TradeSetup(const TradeSetup &other)
-    {
-        entry = other.entry;
-        sl = other.sl;
-        tp = other.tp;
-        is_ready = other.is_ready;
-    }
     // Default constructor
-    TradeSetup() {}
+    LiveTradeData()
+    {
+        trade_exists = false;
+        entry = 0.0;
+        sl = 0.0;
+        tp = 0.0;
+    }
 };
 
 struct SignalData
@@ -71,6 +71,7 @@ struct SignalData
 #define PANE_BG_OPACITY 204 // Approx 80% (255 * 0.8)
 #define CONFIDENCE_BAR_MAX_WIDTH 100
 #define BIAS_CONFIRMATION_COUNT 3 // Number of consecutive ticks to confirm a bias change
+#define ALERT_COOLDOWN_SECONDS 300 // 5 minutes
 
 // --- Colors (Optimized for Dark Backgrounds)
 #define COLOR_BULL clrLimeGreen
@@ -109,52 +110,111 @@ ENUM_BIAS g_last_displayed_bias[6];
 ENUM_BIAS g_pending_bias[6];
 int       g_confirmation_count[6];
 
+// --- Global State for Alerts
+datetime  g_last_alert_time = 0;
+ENUM_BIAS g_last_final_signal = BIAS_NEUTRAL;
+ENUM_ZONE g_last_zone_status = ZONE_NONE;
+
 // --- Global for Pip Size Calculation
 double g_pip_value;
 
 
 //+------------------------------------------------------------------+
-//|                  DATA INTEGRATION PLACEHOLDERS                   |
+//|                  REAL DATA INTEGRATION FUNCTIONS                 |
 //+------------------------------------------------------------------+
 ENUM_BIAS GetCompassBiasTF(string tf)
 {
-    // --- STABLE MOCK DATA ---
-    // Returns a fixed bias for each timeframe for consistent testing.
-    if(tf == "M1" || tf == "M5") return BIAS_BULL;
-    if(tf == "M15" || tf == "H1") return BIAS_BULL;
-    if(tf == "H4") return BIAS_BEAR;
-    if(tf == "D1") return BIAS_BULL;
+    // --- LIVE DATA from AlfredCompass.mq5 ---
+    int tf_index = -1;
+    if(tf == "M1") tf_index = 0;
+    else if(tf == "M5") tf_index = 1;
+    else if(tf == "M15") tf_index = 2;
+    else if(tf == "H1") tf_index = 3;
+    else if(tf == "H4") tf_index = 4;
+    else if(tf == "D1") tf_index = 5;
+    if(tf_index == -1) return BIAS_NEUTRAL;
+
+    static ENUM_BIAS last_known_bias[6];
+    int buffer_index = tf_index;
+    double raw_value = iCustom(_Symbol, 0, "AlfredCompass", buffer_index, 0);
+
+    if(raw_value == EMPTY_VALUE) return last_known_bias[tf_index];
+
+    ENUM_BIAS current_bias = BIAS_NEUTRAL;
+    if(raw_value > 0) current_bias = BIAS_BULL;
+    if(raw_value < 0) current_bias = BIAS_BEAR;
     
-    return BIAS_NEUTRAL;
+    last_known_bias[tf_index] = current_bias;
+    return current_bias;
 }
 
 ENUM_ZONE GetZoneStatus()
 {
-    // --- STABLE MOCK DATA ---
-    // Consistently returns Demand for testing.
-    return ZONE_DEMAND;
+    // --- LIVE DATA from AlfredSupDemCore.mq5 ---
+    static ENUM_ZONE last_known_zone = ZONE_NONE;
+    double raw_value = iCustom(_Symbol, 0, "AlfredSupDemCore", 0, 0);
+
+    if(raw_value == EMPTY_VALUE) return last_known_zone;
+
+    ENUM_ZONE current_zone = ZONE_NONE;
+    if(raw_value > 0) current_zone = ZONE_DEMAND;
+    if(raw_value < 0) current_zone = ZONE_SUPPLY;
+
+    last_known_zone = current_zone;
+    return current_zone;
 }
 
-TradeSetup GetTradeSetup()
+LiveTradeData FetchTradeLevels()
 {
-    // --- STABLE MOCK DATA ---
-    TradeSetup setup;
-    double current_price = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-    setup.entry = current_price;
-    setup.sl = current_price - 500 * SymbolInfoDouble(_Symbol, SYMBOL_POINT);
-    setup.tp = current_price + 1000 * SymbolInfoDouble(_Symbol, SYMBOL_POINT);
-    setup.is_ready = true; // Default to ready for consistent display
-    return setup;
+    LiveTradeData data;
+    for(int i = PositionsTotal() - 1; i >= 0; i--)
+    {
+        if(PositionGetString(POSITION_SYMBOL) == _Symbol)
+        {
+            data.trade_exists = true;
+            data.entry = PositionGetDouble(POSITION_PRICE_OPEN);
+            data.sl = PositionGetDouble(POSITION_SL);
+            data.tp = PositionGetDouble(POSITION_TP);
+            break;
+        }
+    }
+    return data;
 }
 
 SignalData GetSignalData()
 {
-    // --- STABLE MOCK DATA ---
-    // Returns a static BUY signal with 85% confidence.
+    // --- MOCK DATA FOR TESTING ALERTS ---
     SignalData data;
-    data.direction = BIAS_BULL;
+    if(TimeCurrent() % 20 > 10)
+    {
+       data.direction = BIAS_BULL;
+    }
+    else
+    {
+       data.direction = BIAS_BEAR;
+    }
     data.confidence = 85.0;
     return data;
+}
+
+
+//+------------------------------------------------------------------+
+//|                        ALERTING SYSTEM                           |
+//+------------------------------------------------------------------+
+void PaneTriggerAlert(string msg)
+{
+    // Enforce a 5-minute cooldown between alerts
+    if(TimeCurrent() - g_last_alert_time < ALERT_COOLDOWN_SECONDS)
+    {
+        return; // Cooldown active, do not send alert
+    }
+
+    // --- NEW: Send alert to the central AlertCenter ---
+    // The AlertCenter EA/indicator is responsible for the actual Alert() and Print().
+    AlertCenter_Send("Pane", msg);
+    
+    // Update the timestamp locally to maintain the cooldown
+    g_last_alert_time = TimeCurrent();
 }
 
 
@@ -163,7 +223,7 @@ SignalData GetSignalData()
 //+------------------------------------------------------------------+
 double CalculatePips(double price1, double price2)
 {
-    if(g_pip_value == 0) return 0;
+    if(g_pip_value == 0 || price1 == 0 || price2 == 0) return 0;
     return MathAbs(price1 - price2) / g_pip_value;
 }
 
@@ -352,7 +412,7 @@ void CreatePanel()
     CreateLabel("trade_sl_value", "-", x_col2_value, y_offset, COLOR_NEUTRAL, FONT_SIZE_NORMAL);
     y_offset += SPACING_MEDIUM;
     CreateLabel("trade_status_prefix", "Status:", x_col2_prefix, y_offset, COLOR_HEADER, FONT_SIZE_NORMAL);
-    CreateLabel("trade_status_value", "☐ Not Ready", x_col2_value, y_offset, COLOR_NEUTRAL, FONT_SIZE_NORMAL);
+    CreateLabel("trade_status_value", "☐ No Trade", x_col2_value, y_offset, COLOR_NEUTRAL, FONT_SIZE_NORMAL);
     y_offset += SPACING_SEPARATOR;
     CreateRectangle("sep4", x_offset, y_offset, PANE_WIDTH - 20, 1, COLOR_SEPARATOR, BORDER_FLAT);
     y_offset += SPACING_SEPARATOR;
@@ -409,7 +469,6 @@ void UpdatePanel()
                     g_last_displayed_bias[i] = confirmed_bias;
                     UpdateLabel("biases_"+tfs[i]+"_value", BiasToString(g_last_displayed_bias[i]), BiasToColor(g_last_displayed_bias[i]));
                 }
-                // If a neutral signal is confirmed, we don't update the UI, keeping the last strong signal.
             }
         }
     }
@@ -443,14 +502,40 @@ void UpdatePanel()
     ENUM_ZONE magnet_zone = GetZoneStatus();
     UpdateLabel("magnet_zone_value", ZoneToString(magnet_zone), ZoneToColor(magnet_zone));
 
-    TradeSetup setup = GetTradeSetup();
+    // --- Check for Alert Conditions
+    if(signal.direction != g_last_final_signal && signal.direction != BIAS_NEUTRAL)
+    {
+        PaneTriggerAlert("Final Signal changed to " + BiasToString(signal.direction));
+        g_last_final_signal = signal.direction;
+    }
+    if(magnet_zone != g_last_zone_status && magnet_zone != ZONE_NONE)
+    {
+        PaneTriggerAlert("Magnet Zone changed to " + ZoneToString(magnet_zone));
+        g_last_zone_status = magnet_zone;
+    }
+
+
+    // --- Update Trade Now Section with Live Data
+    LiveTradeData trade_data = FetchTradeLevels();
     string price_format = "%." + IntegerToString(_Digits) + "f";
-    UpdateLabel("trade_entry_value", StringFormat(price_format, setup.entry), COLOR_NEUTRAL);
-    string sl_text = StringFormat(price_format, setup.sl) + " (" + DoubleToString(CalculatePips(setup.entry, setup.sl), 1) + " p)";
-    string tp_text = StringFormat(price_format, setup.tp) + " (" + DoubleToString(CalculatePips(setup.entry, setup.tp), 1) + " p)";
-    UpdateLabel("trade_sl_value", sl_text, COLOR_NEUTRAL);
-    UpdateLabel("trade_tp_value", tp_text, COLOR_NEUTRAL);
-    UpdateLabel("trade_status_value", setup.is_ready ? "☑ Ready" : "☐ Not Ready", setup.is_ready ? COLOR_BULL : COLOR_NEUTRAL);
+
+    if(trade_data.trade_exists)
+    {
+        UpdateLabel("trade_entry_value", StringFormat(price_format, trade_data.entry), COLOR_NEUTRAL);
+        string sl_text = StringFormat(price_format, trade_data.sl) + " (" + DoubleToString(CalculatePips(trade_data.entry, trade_data.sl), 1) + " p)";
+        string tp_text = StringFormat(price_format, trade_data.tp) + " (" + DoubleToString(CalculatePips(trade_data.entry, trade_data.tp), 1) + " p)";
+        UpdateLabel("trade_sl_value", sl_text, COLOR_NEUTRAL);
+        UpdateLabel("trade_tp_value", tp_text, COLOR_NEUTRAL);
+        UpdateLabel("trade_status_value", "☑ Active", COLOR_BULL);
+    }
+    else
+    {
+        UpdateLabel("trade_entry_value", "---", COLOR_NEUTRAL);
+        UpdateLabel("trade_sl_value", "---", COLOR_NEUTRAL);
+        UpdateLabel("trade_tp_value", "---", COLOR_NEUTRAL);
+        UpdateLabel("trade_status_value", "☐ No Trade", COLOR_NEUTRAL);
+    }
+
 
     UpdateLabel("alfred_says", GetAlfredMessage(signal.direction), COLOR_ALFRED_MSG);
 
