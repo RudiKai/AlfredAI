@@ -10,7 +10,7 @@
 
 // --- Includes
 #include <ChartObjects\ChartObjectsTxtControls.mqh>
-#include "AlfredAlertCenter_Include.mqh" // <-- NEW: Integration with AlertCenter
+#include <AlfredAlertCenter_Include.mqh> // <-- NEW: Integration with AlertCenter
 
 // --- Enums for State Management (Clean & Safe)
 enum ENUM_BIAS
@@ -28,7 +28,6 @@ enum ENUM_ZONE
 };
 
 // --- Structs for Data Handling
-// This struct holds data about an active trade
 struct LiveTradeData
 {
     bool   trade_exists;
@@ -36,13 +35,14 @@ struct LiveTradeData
     double sl;
     double tp;
 
-    // Default constructor
-    LiveTradeData()
+    LiveTradeData() { trade_exists = false; entry = 0.0; sl = 0.0; tp = 0.0; }
+    // Copy constructor to resolve compiler warning
+    LiveTradeData(const LiveTradeData &other)
     {
-        trade_exists = false;
-        entry = 0.0;
-        sl = 0.0;
-        tp = 0.0;
+        trade_exists = other.trade_exists;
+        entry = other.entry;
+        sl = other.sl;
+        tp = other.tp;
     }
 };
 
@@ -51,13 +51,7 @@ struct SignalData
     ENUM_BIAS direction;
     double    confidence; // 0.0 to 100.0
 
-    // Copy constructor to resolve compiler warning
-    SignalData(const SignalData &other)
-    {
-        direction = other.direction;
-        confidence = other.confidence;
-    }
-    // Default constructor
+    SignalData(const SignalData &other) { direction = other.direction; confidence = other.confidence; }
     SignalData() {}
 };
 
@@ -68,12 +62,12 @@ struct SignalData
 #define PANE_X_POS 10
 #define PANE_Y_POS 10
 #define PANE_BG_COLOR clrDimGray
-#define PANE_BG_OPACITY 204 // Approx 80% (255 * 0.8)
+#define PANE_BG_OPACITY 204
 #define CONFIDENCE_BAR_MAX_WIDTH 100
-#define BIAS_CONFIRMATION_COUNT 3 // Number of consecutive ticks to confirm a bias change
-#define ALERT_COOLDOWN_SECONDS 300 // 5 minutes
+#define BIAS_CONFIRMATION_COUNT 3
+#define ALERT_COOLDOWN_SECONDS 300
 
-// --- Colors (Optimized for Dark Backgrounds)
+// --- Colors
 #define COLOR_BULL clrLimeGreen
 #define COLOR_BEAR clrOrangeRed
 #define COLOR_NEUTRAL clrWhite
@@ -87,35 +81,24 @@ struct SignalData
 #define COLOR_CONF_LOW clrFireBrick
 #define COLOR_SEPARATOR clrGray
 
-// --- Font Sizes
+// --- Font Sizes & Spacing
 #define FONT_SIZE_NORMAL 8
-#define FONT_SIZE_HEADER 9 // Slightly larger to appear bold
-
-// --- Spacing
-#define SPACING_SMALL 8
+#define FONT_SIZE_HEADER 9
 #define SPACING_MEDIUM 16
 #define SPACING_LARGE 24
 #define SPACING_SEPARATOR 12
 
-// --- Indicator Handles
-int hATR_current; // ATR for the current timeframe
+// --- Indicator Handles & Globals
+int hATR_current;
 int atr_period = 14;
-
-// --- Global State for Collapsible Sections
 bool g_biases_expanded = true;
 bool g_hud_expanded = true;
-
-// --- Global State for Bias Stabilization
 ENUM_BIAS g_last_displayed_bias[6];
 ENUM_BIAS g_pending_bias[6];
 int       g_confirmation_count[6];
-
-// --- Global State for Alerts
 datetime  g_last_alert_time = 0;
 ENUM_BIAS g_last_final_signal = BIAS_NEUTRAL;
 ENUM_ZONE g_last_zone_status = ZONE_NONE;
-
-// --- Global for Pip Size Calculation
 double g_pip_value;
 
 
@@ -126,24 +109,16 @@ ENUM_BIAS GetCompassBiasTF(string tf)
 {
     // --- LIVE DATA from AlfredCompass.mq5 ---
     int tf_index = -1;
-    if(tf == "M1") tf_index = 0;
-    else if(tf == "M5") tf_index = 1;
-    else if(tf == "M15") tf_index = 2;
-    else if(tf == "H1") tf_index = 3;
-    else if(tf == "H4") tf_index = 4;
-    else if(tf == "D1") tf_index = 5;
+    if(tf == "M1") tf_index = 0; else if(tf == "M5") tf_index = 1; else if(tf == "M15") tf_index = 2;
+    else if(tf == "H1") tf_index = 3; else if(tf == "H4") tf_index = 4; else if(tf == "D1") tf_index = 5;
     if(tf_index == -1) return BIAS_NEUTRAL;
 
     static ENUM_BIAS last_known_bias[6];
-    int buffer_index = tf_index;
-    double raw_value = iCustom(_Symbol, 0, "AlfredCompass", buffer_index, 0);
+    double raw_value = iCustom(_Symbol, 0, "AlfredCompass", tf_index, 0);
 
     if(raw_value == EMPTY_VALUE) return last_known_bias[tf_index];
 
-    ENUM_BIAS current_bias = BIAS_NEUTRAL;
-    if(raw_value > 0) current_bias = BIAS_BULL;
-    if(raw_value < 0) current_bias = BIAS_BEAR;
-    
+    ENUM_BIAS current_bias = (raw_value > 0) ? BIAS_BULL : (raw_value < 0) ? BIAS_BEAR : BIAS_NEUTRAL;
     last_known_bias[tf_index] = current_bias;
     return current_bias;
 }
@@ -156,10 +131,7 @@ ENUM_ZONE GetZoneStatus()
 
     if(raw_value == EMPTY_VALUE) return last_known_zone;
 
-    ENUM_ZONE current_zone = ZONE_NONE;
-    if(raw_value > 0) current_zone = ZONE_DEMAND;
-    if(raw_value < 0) current_zone = ZONE_SUPPLY;
-
+    ENUM_ZONE current_zone = (raw_value > 0) ? ZONE_DEMAND : (raw_value < 0) ? ZONE_SUPPLY : ZONE_NONE;
     last_known_zone = current_zone;
     return current_zone;
 }
@@ -204,13 +176,9 @@ SignalData GetSignalData()
 void PaneTriggerAlert(string msg)
 {
     // Enforce a 5-minute cooldown between alerts
-    if(TimeCurrent() - g_last_alert_time < ALERT_COOLDOWN_SECONDS)
-    {
-        return; // Cooldown active, do not send alert
-    }
+    if(TimeCurrent() - g_last_alert_time < ALERT_COOLDOWN_SECONDS) return;
 
     // --- NEW: Send alert to the central AlertCenter ---
-    // The AlertCenter EA/indicator is responsible for the actual Alert() and Print().
     AlertCenter_Send("Pane", msg);
     
     // Update the timestamp locally to maintain the cooldown
@@ -227,63 +195,29 @@ double CalculatePips(double price1, double price2)
     return MathAbs(price1 - price2) / g_pip_value;
 }
 
-string GetAlfredMessage(ENUM_BIAS final_bias)
-{
-    switch(final_bias)
-    {
-        case BIAS_BULL: return "Strong bullish sentiment detected.";
-        case BIAS_BEAR: return "Strong bearish sentiment detected.";
-        case BIAS_NEUTRAL: return "Market is consolidating. Awaiting signal.";
-    }
-    return "Thinking...";
-}
-
 string BiasToString(ENUM_BIAS bias)
 {
-    switch(bias)
-    {
-        case BIAS_BULL: return "BUY";
-        case BIAS_BEAR: return "SELL";
-        case BIAS_NEUTRAL: return "NEUTRAL";
-    }
-    return "N/A";
+    switch(bias) { case BIAS_BULL: return "BUY"; case BIAS_BEAR: return "SELL"; default: return "NEUTRAL"; }
 }
 
 color BiasToColor(ENUM_BIAS bias)
 {
-    switch(bias)
-    {
-        case BIAS_BULL: return COLOR_BULL;
-        case BIAS_BEAR: return COLOR_BEAR;
-        case BIAS_NEUTRAL: return COLOR_NEUTRAL;
-    }
-    return COLOR_NEUTRAL;
+    switch(bias) { case BIAS_BULL: return COLOR_BULL; case BIAS_BEAR: return COLOR_BEAR; default: return COLOR_NEUTRAL; }
 }
 
 string ZoneToString(ENUM_ZONE zone)
 {
-    switch(zone)
-    {
-        case ZONE_DEMAND: return "Demand";
-        case ZONE_SUPPLY: return "Supply";
-        case ZONE_NONE: return "None";
-    }
-    return "N/A";
+    switch(zone) { case ZONE_DEMAND: return "Demand"; case ZONE_SUPPLY: return "Supply"; default: return "None"; }
 }
 
 color ZoneToColor(ENUM_ZONE zone)
 {
-    switch(zone)
-    {
-        case ZONE_DEMAND: return COLOR_DEMAND;
-        case ZONE_SUPPLY: return COLOR_SUPPLY;
-        case ZONE_NONE: return COLOR_NEUTRAL;
-    }
-    return COLOR_NEUTRAL;
+    switch(zone) { case ZONE_DEMAND: return COLOR_DEMAND; case ZONE_SUPPLY: return COLOR_SUPPLY; default: return COLOR_NEUTRAL; }
 }
 
+
 //+------------------------------------------------------------------+
-//| Helper to create a text label                                    |
+//|                       UI DRAWING HELPERS                         |
 //+------------------------------------------------------------------+
 void CreateLabel(string name, string text, int x, int y, color clr, int font_size=FONT_SIZE_NORMAL, ENUM_ANCHOR_POINT anchor=ANCHOR_LEFT)
 {
@@ -299,9 +233,6 @@ void CreateLabel(string name, string text, int x, int y, color clr, int font_siz
     ObjectSetInteger(0, obj_name, OBJPROP_BACK, false);
 }
 
-//+------------------------------------------------------------------+
-//| Helper to create a rectangle label (for bars and separators)     |
-//+------------------------------------------------------------------+
 void CreateRectangle(string name, int x, int y, int width, int height, color clr, ENUM_BORDER_TYPE border=BORDER_FLAT)
 {
     string obj_name = PANE_PREFIX + name;
@@ -311,28 +242,21 @@ void CreateRectangle(string name, int x, int y, int width, int height, color clr
     ObjectSetInteger(0, obj_name, OBJPROP_XSIZE, width);
     ObjectSetInteger(0, obj_name, OBJPROP_YSIZE, height);
     ObjectSetInteger(0, obj_name, OBJPROP_BGCOLOR, clr);
-    ObjectSetInteger(0, obj_name, OBJPROP_COLOR, clr); // Border color
+    ObjectSetInteger(0, obj_name, OBJPROP_COLOR, clr);
     ObjectSetInteger(0, obj_name, OBJPROP_BORDER_TYPE, border);
     ObjectSetInteger(0, obj_name, OBJPROP_BACK, true);
 }
 
-
-//+------------------------------------------------------------------+
-//| Helper to update a label's text and color                        |
-//+------------------------------------------------------------------+
 void UpdateLabel(string name, string text, color clr = clrNONE)
 {
     string obj_name = PANE_PREFIX + name;
     if(ObjectFind(0, obj_name) < 0) return;
     ObjectSetString(0, obj_name, OBJPROP_TEXT, text);
-    if(clr != clrNONE)
-    {
-        ObjectSetInteger(0, obj_name, OBJPROP_COLOR, clr);
-    }
+    if(clr != clrNONE) ObjectSetInteger(0, obj_name, OBJPROP_COLOR, clr);
 }
 
 //+------------------------------------------------------------------+
-//| Function to create the entire panel based on current states      |
+//|                MAIN PANEL CREATION & UPDATE LOGIC                |
 //+------------------------------------------------------------------+
 void CreatePanel()
 {
@@ -365,7 +289,6 @@ void CreatePanel()
     CreateRectangle("sep1", x_offset, y_offset, PANE_WIDTH - 20, 1, COLOR_SEPARATOR, BORDER_FLAT);
     y_offset += SPACING_SEPARATOR;
 
-
     // --- HUD Metrics Section
     CreateLabel("hud_header", "HUD Metrics", x_offset, y_offset, COLOR_HEADER, FONT_SIZE_HEADER);
     CreateLabel("hud_toggle", g_hud_expanded ? "[-]" : "[+]", x_toggle, y_offset, COLOR_TOGGLE, FONT_SIZE_HEADER);
@@ -391,7 +314,7 @@ void CreatePanel()
     CreateLabel("signal_conf_prefix", "Confidence:", x_col2_prefix, y_offset, COLOR_HEADER, FONT_SIZE_NORMAL);
     CreateLabel("signal_conf_value", "-", x_col2_value + 60, y_offset, COLOR_NEUTRAL, FONT_SIZE_NORMAL);
     CreateRectangle("signal_conf_bar_bg", x_col2_value, y_offset, CONFIDENCE_BAR_MAX_WIDTH, 10, clrGray, BORDER_FLAT);
-    CreateRectangle("signal_conf_bar_fg", x_col2_value, y_offset, 0, 10, clrNONE, BORDER_FLAT); // Starts with 0 width
+    CreateRectangle("signal_conf_bar_fg", x_col2_value, y_offset, 0, 10, clrNONE, BORDER_FLAT);
     y_offset += SPACING_MEDIUM;
     CreateLabel("magnet_zone_prefix", "Magnet Zone:", x_col2_prefix, y_offset, COLOR_HEADER, FONT_SIZE_NORMAL);
     CreateLabel("magnet_zone_value", "-", x_col2_value, y_offset, COLOR_NEUTRAL, FONT_SIZE_NORMAL);
@@ -420,10 +343,10 @@ void CreatePanel()
     // --- Alfred Says Section
     CreateLabel("alfred_header", "Alfred Says:", x_offset, y_offset, COLOR_HEADER, FONT_SIZE_HEADER);
     y_offset += SPACING_MEDIUM;
-    CreateLabel("alfred_says",   "Thinking...", x_offset, y_offset, COLOR_ALFRED_MSG, FONT_SIZE_NORMAL);
+    CreateLabel("alfred_says", "Thinking...", x_offset, y_offset, COLOR_ALFRED_MSG, FONT_SIZE_NORMAL);
     y_offset += SPACING_MEDIUM;
-
-    // --- Create the main background with dynamic height
+    
+    // --- Background
     string bg_name = PANE_PREFIX + "background";
     ObjectCreate(0, bg_name, OBJ_RECTANGLE_LABEL, 0, 0, 0);
     ObjectSetInteger(0, bg_name, OBJPROP_XDISTANCE, PANE_X_POS);
@@ -437,9 +360,6 @@ void CreatePanel()
     ObjectSetInteger(0, bg_name, OBJPROP_BGCOLOR, bg_color_opacity);
 }
 
-//+------------------------------------------------------------------+
-//| Function to update all dynamic data on the panel                 |
-//+------------------------------------------------------------------+
 void UpdatePanel()
 {
     // --- Stabilize and Update TF Biases Section
@@ -448,32 +368,23 @@ void UpdatePanel()
         string tfs[] = {"M1", "M5", "M15", "H1", "H4", "D1"};
         for(int i=0; i<ArraySize(tfs); i++)
         {
-            ENUM_BIAS current_raw_bias = GetCompassBiasTF(tfs[i]);
-
-            if(current_raw_bias == g_pending_bias[i])
-            {
-                g_confirmation_count[i]++;
-            }
-            else
-            {
-                g_pending_bias[i] = current_raw_bias;
-                g_confirmation_count[i] = 1;
-            }
-            
-            if(g_confirmation_count[i] >= BIAS_CONFIRMATION_COUNT)
-            {
-                ENUM_BIAS confirmed_bias = g_pending_bias[i];
-                
-                if(confirmed_bias != BIAS_NEUTRAL && confirmed_bias != g_last_displayed_bias[i])
-                {
-                    g_last_displayed_bias[i] = confirmed_bias;
-                    UpdateLabel("biases_"+tfs[i]+"_value", BiasToString(g_last_displayed_bias[i]), BiasToColor(g_last_displayed_bias[i]));
-                }
-            }
+             ENUM_BIAS current_raw_bias = GetCompassBiasTF(tfs[i]);
+             if(current_raw_bias == g_pending_bias[i]) g_confirmation_count[i]++;
+             else { g_pending_bias[i] = current_raw_bias; g_confirmation_count[i] = 1; }
+             
+             if(g_confirmation_count[i] >= BIAS_CONFIRMATION_COUNT)
+             {
+                 ENUM_BIAS confirmed_bias = g_pending_bias[i];
+                 if(confirmed_bias != BIAS_NEUTRAL && confirmed_bias != g_last_displayed_bias[i])
+                 {
+                     g_last_displayed_bias[i] = confirmed_bias;
+                     UpdateLabel("biases_"+tfs[i]+"_value", BiasToString(g_last_displayed_bias[i]), BiasToColor(g_last_displayed_bias[i]));
+                 }
+             }
         }
     }
 
-    // --- Update other sections
+    // --- Update HUD Metrics Section
     if(g_hud_expanded)
     {
         long spread_points = SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
@@ -502,7 +413,6 @@ void UpdatePanel()
     ENUM_ZONE magnet_zone = GetZoneStatus();
     UpdateLabel("magnet_zone_value", ZoneToString(magnet_zone), ZoneToColor(magnet_zone));
 
-    // --- Check for Alert Conditions
     if(signal.direction != g_last_final_signal && signal.direction != BIAS_NEUTRAL)
     {
         PaneTriggerAlert("Final Signal changed to " + BiasToString(signal.direction));
@@ -514,8 +424,6 @@ void UpdatePanel()
         g_last_zone_status = magnet_zone;
     }
 
-
-    // --- Update Trade Now Section with Live Data
     LiveTradeData trade_data = FetchTradeLevels();
     string price_format = "%." + IntegerToString(_Digits) + "f";
 
@@ -536,8 +444,7 @@ void UpdatePanel()
         UpdateLabel("trade_status_value", "☐ No Trade", COLOR_NEUTRAL);
     }
 
-
-    UpdateLabel("alfred_says", GetAlfredMessage(signal.direction), COLOR_ALFRED_MSG);
+    UpdateLabel("alfred_says", "Thinking...", COLOR_ALFRED_MSG);
 
     ChartRedraw();
 }
@@ -565,7 +472,6 @@ int OnInit()
         g_pip_value *= 10;
     }
     
-    // Initialize bias stabilization arrays
     for(int i=0; i<6; i++)
     {
         g_last_displayed_bias[i] = BIAS_NEUTRAL;
