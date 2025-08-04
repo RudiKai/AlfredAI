@@ -1,42 +1,290 @@
 //+------------------------------------------------------------------+
-//|                       AlfredAI_Pane™                             |
-//|                            v1.00                                 |
+//|                        AlfredAI_Pane.mq5                         |
+//|               Refactored for Clarity and Performance             |
+//|                    Copyright 2024, RudiKai                       |
+//|                     https://github.com/RudiKai                   |
 //+------------------------------------------------------------------+
-#property indicator_chart_window
 #property strict
-#property indicator_buffers 1
-#property indicator_plots   1
-#property indicator_type1   DRAW_NONE
-#property indicator_label1  "AlfredAI_Pane™"
+#property indicator_chart_window
 
-#include <AlfredSettings.mqh>
-#include <AlfredInit.mqh>
+// --- Includes
+#include <ChartObjects\ChartObjectsTxtControls.mqh>
 
-double dummyBuffer[];
+// --- Enums for State Management (Clean & Safe)
+enum ENUM_BIAS
+{
+    BIAS_BULL,
+    BIAS_BEAR,
+    BIAS_NEUTRAL
+};
 
-//--- globals
-string lastFinalSignal = "Neutral";
-int    atrHandle       = INVALID_HANDLE;
+enum ENUM_ZONE
+{
+    ZONE_DEMAND,
+    ZONE_SUPPLY,
+    ZONE_NONE
+};
+
+
+// --- Constants for Panel Layout
+#define PANE_PREFIX "AlfredPane_"
+#define PANE_WIDTH 220
+#define PANE_X_POS 10
+#define PANE_Y_POS 10
+#define PANE_BG_COLOR clrDimGray
+#define PANE_BG_OPACITY 204 // Approx 80% (255 * 0.8)
+
+// --- Colors (Optimized for Dark Backgrounds)
+#define COLOR_BULL clrLimeGreen
+#define COLOR_BEAR clrOrangeRed
+#define COLOR_NEUTRAL clrWhite
+#define COLOR_HEADER clrSilver
+#define COLOR_TOGGLE clrLightGray
+#define COLOR_ALFRED_MSG clrLightYellow
+#define COLOR_DEMAND clrLimeGreen
+#define COLOR_SUPPLY clrOrangeRed
+
+// --- Font Sizes
+#define FONT_SIZE_NORMAL 8
+#define FONT_SIZE_HEADER 9 // Slightly larger to appear bold
+
+// --- Spacing
+#define SPACING_SMALL 8
+#define SPACING_MEDIUM 16
+#define SPACING_LARGE 24
+
+// --- Indicator Handles
+int hATR_current; // ATR for the current timeframe
+int atr_period = 14;
+
+// --- Global State for Collapsible Sections
+bool g_biases_expanded = true;
+bool g_hud_expanded = true;
+bool g_zones_expanded = true;
+
+//+------------------------------------------------------------------+
+//| Forward declarations                                             |
+//+------------------------------------------------------------------+
+void UpdatePanel();
+string GetAlfredMessage(ENUM_BIAS final_bias);
+ENUM_BIAS GetCompassBiasTF(string tf);
+ENUM_ZONE GetZoneStatus();
+string BiasToString(ENUM_BIAS bias);
+color BiasToColor(ENUM_BIAS bias);
+string ZoneToString(ENUM_ZONE zone);
+color ZoneToColor(ENUM_ZONE zone);
+
+//+------------------------------------------------------------------+
+//| Helper to create a text label                                    |
+//+------------------------------------------------------------------+
+void CreateLabel(string name, string text, int x, int y, color clr, int font_size=FONT_SIZE_NORMAL, ENUM_ANCHOR_POINT anchor=ANCHOR_LEFT)
+{
+    string obj_name = PANE_PREFIX + name;
+    ObjectCreate(0, obj_name, OBJ_LABEL, 0, 0, 0);
+    ObjectSetString(0, obj_name, OBJPROP_TEXT, text);
+    ObjectSetInteger(0, obj_name, OBJPROP_XDISTANCE, x);
+    ObjectSetInteger(0, obj_name, OBJPROP_YDISTANCE, y);
+    ObjectSetInteger(0, obj_name, OBJPROP_COLOR, clr);
+    ObjectSetInteger(0, obj_name, OBJPROP_FONTSIZE, font_size);
+    ObjectSetString(0, obj_name, OBJPROP_FONT, "Arial");
+    ObjectSetInteger(0, obj_name, OBJPROP_ANCHOR, anchor);
+    ObjectSetInteger(0, obj_name, OBJPROP_BACK, false);
+}
+
+//+------------------------------------------------------------------+
+//| Function to create the entire panel based on current states      |
+//+------------------------------------------------------------------+
+void CreatePanel()
+{
+    // --- Define layout positions
+    int x_offset = PANE_X_POS + 10;
+    int y_offset = PANE_Y_POS + 10;
+    int x_col2 = x_offset + 110;
+    int x_toggle = PANE_X_POS + PANE_WIDTH - 20;
+
+    // --- Symbol Header (always visible)
+    CreateLabel("symbol_header", _Symbol, x_offset, y_offset, COLOR_HEADER, 10);
+    y_offset += SPACING_LARGE;
+
+    // --- TF Biases Section
+    CreateLabel("biases_header", "TF Biases", x_offset, y_offset, COLOR_HEADER, FONT_SIZE_HEADER);
+    CreateLabel("biases_toggle", g_biases_expanded ? "[-]" : "[+]", x_toggle, y_offset, COLOR_TOGGLE, FONT_SIZE_HEADER);
+    y_offset += SPACING_MEDIUM;
+    if(g_biases_expanded)
+    {
+        int x_col2_prefix = x_col2;
+        int x_col2_value  = x_col2_prefix + 32;
+        CreateLabel("biases_M1_prefix",   "M1:", x_col2_prefix, y_offset, COLOR_HEADER);
+        CreateLabel("biases_M1_value",    "-",   x_col2_value,  y_offset, COLOR_NEUTRAL);
+        y_offset += SPACING_MEDIUM;
+        CreateLabel("biases_M5_prefix",   "M5:", x_col2_prefix, y_offset, COLOR_HEADER);
+        CreateLabel("biases_M5_value",    "-",   x_col2_value,  y_offset, COLOR_NEUTRAL);
+        y_offset += SPACING_MEDIUM;
+        CreateLabel("biases_M15_prefix",  "M15:",x_col2_prefix, y_offset, COLOR_HEADER);
+        CreateLabel("biases_M15_value",   "-",   x_col2_value,  y_offset, COLOR_NEUTRAL);
+        y_offset += SPACING_MEDIUM;
+        CreateLabel("biases_H1_prefix",   "H1:", x_col2_prefix, y_offset, COLOR_HEADER);
+        CreateLabel("biases_H1_value",    "-",   x_col2_value,  y_offset, COLOR_NEUTRAL);
+        y_offset += SPACING_MEDIUM;
+        CreateLabel("biases_H4_prefix",   "H4:", x_col2_prefix, y_offset, COLOR_HEADER);
+        CreateLabel("biases_H4_value",    "-",   x_col2_value,  y_offset, COLOR_NEUTRAL);
+        y_offset += SPACING_MEDIUM;
+        CreateLabel("biases_D1_prefix",   "D1:", x_col2_prefix, y_offset, COLOR_HEADER);
+        CreateLabel("biases_D1_value",    "-",   x_col2_value,  y_offset, COLOR_NEUTRAL);
+    }
+    y_offset += SPACING_LARGE; // Section break
+
+    // --- HUD Metrics Section
+    CreateLabel("hud_header", "HUD Metrics", x_offset, y_offset, COLOR_HEADER, FONT_SIZE_HEADER);
+    CreateLabel("hud_toggle", g_hud_expanded ? "[-]" : "[+]", x_toggle, y_offset, COLOR_TOGGLE, FONT_SIZE_HEADER);
+    y_offset += SPACING_MEDIUM;
+    if(g_hud_expanded)
+    {
+        CreateLabel("hud_spread", "Spread:", x_col2 - 40, y_offset, COLOR_HEADER);
+        CreateLabel("hud_spread_val", "-", x_col2 + 20, y_offset, COLOR_NEUTRAL);
+        y_offset += SPACING_MEDIUM;
+        CreateLabel("hud_atr", "ATR ("+IntegerToString(atr_period)+"):", x_col2-40, y_offset, COLOR_HEADER);
+        CreateLabel("hud_atr_val", "-", x_col2+20, y_offset, COLOR_NEUTRAL);
+    }
+    y_offset += SPACING_LARGE; // Section break
+
+    // --- Zones Section
+    CreateLabel("zones_header", "Zones", x_offset, y_offset, COLOR_HEADER, FONT_SIZE_HEADER);
+    CreateLabel("zones_toggle", g_zones_expanded ? "[-]" : "[+]", x_toggle, y_offset, COLOR_TOGGLE, FONT_SIZE_HEADER);
+    y_offset += SPACING_MEDIUM;
+    if(g_zones_expanded)
+    {
+        CreateLabel("zone_status_prefix", "Status:", x_col2-40, y_offset, COLOR_HEADER);
+        CreateLabel("zone_status_value", "-", x_col2+20, y_offset, COLOR_NEUTRAL);
+    }
+    y_offset += SPACING_LARGE; // Section break
+
+    // --- Trade Now Section (always visible)
+    CreateLabel("trade_header", "Trade Now", x_offset, y_offset, COLOR_HEADER, FONT_SIZE_HEADER);
+    CreateLabel("final_signal", "Signal: -", x_col2, y_offset, COLOR_NEUTRAL);
+    y_offset += SPACING_LARGE;
+
+    // --- Status Section (always visible)
+    CreateLabel("status_header", "Trade Status", x_offset, y_offset, COLOR_HEADER, FONT_SIZE_HEADER);
+    CreateLabel("trade_status",  "-", x_col2, y_offset, COLOR_NEUTRAL);
+    y_offset += SPACING_LARGE;
+
+    // --- Alfred Says Section (always visible)
+    CreateLabel("alfred_header", "Alfred Says:", x_offset, y_offset, COLOR_HEADER, FONT_SIZE_HEADER);
+    y_offset += SPACING_MEDIUM;
+    CreateLabel("alfred_says",   "Thinking...", x_offset, y_offset, COLOR_ALFRED_MSG);
+    y_offset += SPACING_MEDIUM; // Bottom padding
+
+    // --- Finally, create the background with the calculated height
+    string bg_name = PANE_PREFIX + "background";
+    ObjectCreate(0, bg_name, OBJ_RECTANGLE_LABEL, 0, 0, 0);
+    ObjectSetInteger(0, bg_name, OBJPROP_XDISTANCE, PANE_X_POS);
+    ObjectSetInteger(0, bg_name, OBJPROP_YDISTANCE, PANE_Y_POS);
+    ObjectSetInteger(0, bg_name, OBJPROP_XSIZE, PANE_WIDTH);
+    ObjectSetInteger(0, bg_name, OBJPROP_YSIZE, y_offset - PANE_Y_POS); // Dynamic height
+    ObjectSetInteger(0, bg_name, OBJPROP_BACK, true);
+    ObjectSetInteger(0, bg_name, OBJPROP_BORDER_TYPE, BORDER_FLAT);
+    ObjectSetInteger(0, bg_name, OBJPROP_COLOR, clrBlack);
+    color bg_color_opacity = ColorToARGB(PANE_BG_COLOR, PANE_BG_OPACITY);
+    ObjectSetInteger(0, bg_name, OBJPROP_BGCOLOR, bg_color_opacity);
+}
+
+//+------------------------------------------------------------------+
+//| Redraws the entire panel after a state change                    |
+//+------------------------------------------------------------------+
+void RedrawPanel()
+{
+    ObjectsDeleteAll(0, PANE_PREFIX);
+    CreatePanel();
+    UpdatePanel(); // Immediately populate with data
+    ChartRedraw();
+}
+
+//+------------------------------------------------------------------+
+//| Helper to update a label's text and color                        |
+//+------------------------------------------------------------------+
+void UpdateLabel(string name, string text, color clr = clrNONE)
+{
+    string obj_name = PANE_PREFIX + name;
+    if(ObjectFind(0, obj_name) < 0) return; // Don't update if object doesn't exist (section collapsed)
+    
+    ObjectSetString(0, obj_name, OBJPROP_TEXT, text);
+    if(clr != clrNONE)
+    {
+        ObjectSetInteger(0, obj_name, OBJPROP_COLOR, clr);
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Function to update all dynamic data on the panel                 |
+//+------------------------------------------------------------------+
+void UpdatePanel()
+{
+    // --- Get all biases from the placeholder function
+    ENUM_BIAS biasM1 = GetCompassBiasTF("M1");
+    ENUM_BIAS biasM5 = GetCompassBiasTF("M5");
+    ENUM_BIAS biasM15 = GetCompassBiasTF("M15");
+    ENUM_BIAS biasH1 = GetCompassBiasTF("H1");
+    ENUM_BIAS biasH4 = GetCompassBiasTF("H4");
+    ENUM_BIAS biasD1 = GetCompassBiasTF("D1");
+
+    // --- Update TF Biases if expanded
+    if(g_biases_expanded)
+    {
+        UpdateLabel("biases_M1_value", BiasToString(biasM1), BiasToColor(biasM1));
+        UpdateLabel("biases_M5_value", BiasToString(biasM5), BiasToColor(biasM5));
+        UpdateLabel("biases_M15_value", BiasToString(biasM15), BiasToColor(biasM15));
+        UpdateLabel("biases_H1_value", BiasToString(biasH1), BiasToColor(biasH1));
+        UpdateLabel("biases_H4_value", BiasToString(biasH4), BiasToColor(biasH4));
+        UpdateLabel("biases_D1_value", BiasToString(biasD1), BiasToColor(biasD1));
+    }
+
+    // --- Update HUD Metrics if expanded
+    if(g_hud_expanded)
+    {
+        long spread_points = SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
+        UpdateLabel("hud_spread_val", IntegerToString(spread_points) + " pts", COLOR_NEUTRAL);
+        double atr_buffer[1];
+        if(CopyBuffer(hATR_current, 0, 0, 1, atr_buffer) > 0)
+        {
+            UpdateLabel("hud_atr_val", DoubleToString(atr_buffer[0], _Digits), COLOR_NEUTRAL);
+        }
+    }
+    
+    // --- Update Zones if expanded
+    if(g_zones_expanded)
+    {
+        ENUM_ZONE current_zone = GetZoneStatus();
+        UpdateLabel("zone_status_value", ZoneToString(current_zone), ZoneToColor(current_zone));
+    }
+    
+    // --- Always update these sections
+    int bull_count = 0, bear_count = 0;
+    ENUM_BIAS biases[] = {biasM1, biasM5, biasM15, biasH1, biasH4, biasD1};
+    for(int i = 0; i < 6; i++)
+    {
+        if(biases[i] == BIAS_BULL) bull_count++;
+        if(biases[i] == BIAS_BEAR) bear_count++;
+    }
+    ENUM_BIAS final_signal = BIAS_NEUTRAL;
+    if(bull_count >= 4) final_signal = BIAS_BULL;
+    if(bear_count >= 4) final_signal = BIAS_BEAR;
+    UpdateLabel("final_signal", "Signal: " + BiasToString(final_signal), BiasToColor(final_signal));
+
+    UpdateLabel("trade_status", "No Position", COLOR_NEUTRAL);
+    UpdateLabel("alfred_says", GetAlfredMessage(final_signal), COLOR_ALFRED_MSG);
+
+    ChartRedraw();
+}
 
 //+------------------------------------------------------------------+
 //| Custom indicator initialization function                         |
 //+------------------------------------------------------------------+
 int OnInit()
 {
-   // Load central settings
-   InitAlfredDefaults();
-
-
-   // Set up dummy buffer for MT5
-   SetIndexBuffer(0, dummyBuffer, INDICATOR_DATA);
-   ArrayInitialize(dummyBuffer, EMPTY_VALUE);
-
-   // Create ATR handle (H1, period=14)
-   atrHandle = iATR(_Symbol, PERIOD_H1, 14);
-   if (atrHandle == INVALID_HANDLE)
-      return(INIT_FAILED);
-
-   return(INIT_SUCCEEDED);
+    hATR_current = iATR(_Symbol, _Period, atr_period);
+    RedrawPanel();
+    return(INIT_SUCCEEDED);
 }
 
 //+------------------------------------------------------------------+
@@ -45,228 +293,146 @@ int OnInit()
 int OnCalculate(const int rates_total,
                 const int prev_calculated,
                 const datetime &time[],
-                const double   &open[],
-                const double   &high[],
-                const double   &low[],
-                const double   &close[],
-                const long     &tick_volume[],
-                const long     &volume[],
-                const int      &spread[])
+                const double &open[],
+                const double &high[],
+                const double &low[],
+                const double &close[],
+                const long &tick_volume[],
+                const long &volume[],
+                const int &spread[])
 {
-   if (!Alfred.enablePane)
-      return(rates_total);
-
-   // 1) Fetch the real ATR value
-   double atrArr[];
-   double atr = 0.0;
-   if (CopyBuffer(atrHandle, 0, 0, 1, atrArr) == 1)
-      atr = atrArr[0];
-
-   // 2) Build time-frame bias counts
-   ENUM_TIMEFRAMES tfList[] = { PERIOD_M15, PERIOD_M30, PERIOD_H1, PERIOD_H2, PERIOD_H4 };
-   string          tfNames[] = { "M15", "M30", "H1", "H2", "H4" };
-
-   int    buy = 0, sell = 0;
-   string biasLines = "";
-
-   for (int i = 0; i < ArraySize(tfList); i++)
-   {
-      ENUM_TIMEFRAMES tf   = tfList[i];
-      string          name = tfNames[i];
-      string          arrow = "→";
-      string          bias  = "Mixed";
-
-      if (Bars(_Symbol, tf) < 10) 
-         continue;
-
-      // slope = MA(shift=3) - MA(shift=0)
-      double slope = iMA(_Symbol, tf, 8, 3, MODE_SMA, PRICE_CLOSE)
-                   - iMA(_Symbol, tf, 8, 0, MODE_SMA, PRICE_CLOSE);
-
-      int upC = 0, downC = 0;
-      for (int j = 1; j <= 5; j++)
-      {
-         double cNow  = iClose(_Symbol, tf, j);
-         double cPrev = iClose(_Symbol, tf, j + 1);
-         if (cNow > cPrev) upC++;
-         if (cNow < cPrev) downC++;
-      }
-
-      if (slope > 0.0003 || upC >= 4)      { arrow = "↑"; bias = "Buy";  buy++;  }
-      else if (slope < -0.0003 || downC >= 4) { arrow = "↓"; bias = "Sell"; sell++; }
-
-      biasLines += " " + name + " : " + arrow + " " + bias + "\n";
-   }
-
-   // 3) Final signal & confidence
-   string finalSignal = "Neutral";
-   if      (buy > sell) finalSignal = "BUY";
-   else if (sell > buy) finalSignal = "SELL";
-   else                 finalSignal = "MIXED";
-   lastFinalSignal = finalSignal;
-
-   int confidence = 70 + MathMax(buy, sell) * 5;
-   confidence = MathMin(confidence, 100);
-
-   // 4) Zone & magnet
-   string magnetDir = GetMagnetDirection();
-   string zoneWarn  = "";
-   if (Alfred.showZoneWarning && IsNearZone())
-      zoneWarn = "⚠️ Near Zone";
-
-   string alfredComment = GetAlfredComment(finalSignal, magnetDir);
-
-   // 5) SL/TP prices based on ATR multipliers
-   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   double sl  = (finalSignal == "BUY")
-                ? bid - atr * Alfred.atrMultiplierSL
-                : bid + atr * Alfred.atrMultiplierSL;
-   double tp  = (finalSignal == "BUY")
-                ? bid + atr * Alfred.atrMultiplierTP
-                : bid - atr * Alfred.atrMultiplierTP;
-
-   // 6) Convert distances into pips
-   double pipSize = (_Digits >= 5) ? 0.00010 :
-                    (_Digits >= 2) ? 0.10    : _Point;
-   double slDist  = MathAbs(sl - bid);
-   double tpDist  = MathAbs(tp - bid);
-   int    slPips  = (int)(slDist / pipSize);
-   int    tpPips  = (int)(tpDist / pipSize);
-
-   // 7) Format prices cleanly
-   int    digits  = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
-   string slPrice = DoubleToString(sl, digits);
-   string tpPrice = DoubleToString(tp, digits);
-
-   // 8) Build pane text
-   string paneText = "";
-   paneText += "AlfredAI Pane™\n";
-   paneText += "Symbol: " + _Symbol + "\n";
-   paneText += "══════════════════════════════\n";
-   paneText += "TF Biases:\n" + biasLines;
-   paneText += "══════════════════════════════\n";
-   paneText += "Final Signal: " + finalSignal + " (" + IntegerToString(confidence) + "%)\n";
-   paneText += "Magnet Zone: " + magnetDir + "\n";
-   if (zoneWarn != "") paneText += zoneWarn + "\n";
-   paneText += "══════════════════════════════\n";
-   paneText += "If Trade Now:\n";
-   paneText += " SL: " + IntegerToString(slPips) + " pips (" + slPrice + ")\n";
-   paneText += " TP: " + IntegerToString(tpPips) + " pips (" + tpPrice + ")\n";
-   paneText += " Trade Status: " + (finalSignal=="MIXED" ? "STANDBY ⚪" : "READY ✅") + "\n";
-   paneText += "══════════════════════════════\n";
-   paneText += "Alfred says:\n";
-
-   string commentLines[];
-   StringSplit(alfredComment, '.', commentLines);
-   if (ArraySize(commentLines) >= 1) paneText += " " + commentLines[0] + ".\n";
-   if (ArraySize(commentLines) >= 2) paneText += " " + commentLines[1] + ".\n";
-
-   // 9) Draw chart labels
-   string lines[];
-   StringSplit(paneText, '\n', lines);
-   for (int i = 0; i < ArraySize(lines); i++)
-   {
-      string objName = "AlfredAI_Line_" + IntegerToString(i);
-      if (ObjectFind(0, objName) < 0)
-         ObjectCreate(0, objName, OBJ_LABEL, 0, 0, 0);
-
-      ObjectSetInteger(0, objName, OBJPROP_CORNER,    Alfred.corner);
-      ObjectSetInteger(0, objName, OBJPROP_XDISTANCE, Alfred.xOffset);
-      ObjectSetInteger(0, objName, OBJPROP_YDISTANCE, Alfred.yOffset + i*(Alfred.fontSize+2));
-      ObjectSetInteger(0, objName, OBJPROP_FONTSIZE,  Alfred.fontSize);
-      ObjectSetInteger(0, objName, OBJPROP_COLOR,     clrWhite);
-      ObjectSetInteger(0, objName, OBJPROP_SELECTABLE,false);
-      ObjectSetInteger(0, objName, OBJPROP_HIDDEN,    true);
-      ObjectSetString(0, objName, OBJPROP_TEXT,       lines[i]);
-   }
-
-   return(rates_total);
+    UpdatePanel();
+    return(rates_total);
 }
 
 //+------------------------------------------------------------------+
-//| Returns "Demand" or "Supply" for Magnet Zone                     |
+//| Chart event function                                             |
 //+------------------------------------------------------------------+
-string GetMagnetDirection()
+void OnChartEvent(const int id,
+                  const long &lparam,
+                  const double &dparam,
+                  const string &sparam)
 {
-   string d,s,e;
-   GetTFMagnet(PERIOD_H1, d, s, e);
-   return(d);
+    if(id == CHARTEVENT_OBJECT_CLICK)
+    {
+        bool state_changed = false;
+        if(sparam == PANE_PREFIX + "biases_toggle")
+        {
+            g_biases_expanded = !g_biases_expanded;
+            state_changed = true;
+        }
+        else if(sparam == PANE_PREFIX + "hud_toggle")
+        {
+            g_hud_expanded = !g_hud_expanded;
+            state_changed = true;
+        }
+        else if(sparam == PANE_PREFIX + "zones_toggle")
+        {
+            g_zones_expanded = !g_zones_expanded;
+            state_changed = true;
+        }
+
+        if(state_changed)
+        {
+            RedrawPanel();
+        }
+    }
 }
 
 //+------------------------------------------------------------------+
-//| Checks proximity to any supply/demand zone                       |
+//| Deinitialization function                                        |
 //+------------------------------------------------------------------+
-bool IsNearZone()
+void OnDeinit(const int reason)
 {
-   string zones[] = {
-      "DZone_LTF","DZone_H1","DZone_H4","DZone_D1",
-      "SZone_LTF","SZone_H1","SZone_H4","SZone_D1"
-   };
-   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   for (int i=0; i < ArraySize(zones); i++)
-   {
-      if (ObjectFind(0, zones[i]) < 0) continue;
-      double p1 = ObjectGetDouble(0, zones[i], OBJPROP_PRICE, 0);
-      double p2 = ObjectGetDouble(0, zones[i], OBJPROP_PRICE, 1);
-      double mid = (p1 + p2) / 2;
-      if (MathAbs(bid - mid) <= Alfred.zoneProximityThreshold * _Point) 
-         return(true);
-   }
-   return(false);
+    IndicatorRelease(hATR_current);
+    ObjectsDeleteAll(0, PANE_PREFIX);
+    ChartRedraw();
 }
 
 //+------------------------------------------------------------------+
-//| Alfred's comment engine                                          |
+//|                  DATA INTEGRATION PLACEHOLDERS                   |
 //+------------------------------------------------------------------+
-string GetAlfredComment(string signal, string zone)
+//| Replace the logic in these functions with your actual calls to   |
+//| the Compass and SupDemCore indicators.                           |
+//+------------------------------------------------------------------+
+
+ENUM_BIAS GetCompassBiasTF(string tf)
 {
-   if(signal=="BUY"  && zone=="Demand") return("Buy bias confirmed. Momentum building.");
-   if(signal=="SELL" && zone=="Supply") return("Sellers dominate. Patience pays.");
-   if(signal=="MIXED")                    return("Mixed signals. Stay sharp, stay chill.");
-   if(signal=="BUY"  && zone=="Supply")  return("Buy bias vs Supply zone. Caution advised.");
-   if(signal=="SELL" && zone=="Demand")  return("Sell bias vs Demand zone. Watch for flips.");
-   return("Market indecisive. Observe and wait.");
+    // --- PLACEHOLDER LOGIC ---
+    // Replace this with: iCustom(_Symbol, _Period, "CompassIndicator", ...);
+    // For now, it returns a random bias to demonstrate functionality.
+    double random_val = MathRand() / 32767.0;
+    if(random_val > 0.66) return BIAS_BULL;
+    if(random_val < 0.33) return BIAS_BEAR;
+    return BIAS_NEUTRAL;
+}
+
+ENUM_ZONE GetZoneStatus()
+{
+    // --- PLACEHOLDER LOGIC ---
+    // Replace this with: iCustom(_Symbol, _Period, "SupDemCore", ...);
+    // For now, it returns a random zone to demonstrate functionality.
+    double random_val = MathRand() / 32767.0;
+    if(random_val > 0.66) return ZONE_DEMAND;
+    if(random_val < 0.33) return ZONE_SUPPLY;
+    return ZONE_NONE;
 }
 
 //+------------------------------------------------------------------+
-//| Determines best Demand/Supply zone score                         |
+//|                   HELPER & CONVERSION FUNCTIONS                  |
 //+------------------------------------------------------------------+
-double GetTFMagnet(ENUM_TIMEFRAMES tf, string &direction, string &strength, string &eta)
+string GetAlfredMessage(ENUM_BIAS final_bias)
 {
-   string demandZones[] = {"DZone_LTF","DZone_H1","DZone_H4","DZone_D1"};
-   string supplyZones[] = {"SZone_LTF","SZone_H1","SZone_H4","SZone_D1"};
-   double scoreD = -DBL_MAX, scoreS = -DBL_MAX;
-   double bestDemand = EMPTY_VALUE, bestSupply = EMPTY_VALUE;
-   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+    switch(final_bias)
+    {
+        case BIAS_BULL: return "Strong bullish sentiment detected.";
+        case BIAS_BEAR: return "Strong bearish sentiment detected.";
+        case BIAS_NEUTRAL: return "Market is consolidating. Awaiting signal.";
+    }
+    return "Thinking...";
+}
 
-   for (int i=0; i < ArraySize(demandZones); i++)
-   {
-      if (ObjectFind(0, demandZones[i]) < 0) continue;
-      double p1 = ObjectGetDouble(0, demandZones[i], OBJPROP_PRICE, 0);
-      double p2 = ObjectGetDouble(0, demandZones[i], OBJPROP_PRICE, 1);
-      double mid = (p1 + p2) / 2;
-      double dist = MathAbs(bid - mid);
-      double width = MathAbs(p1 - p2);
-      double score = 1000 - dist/_Point - width/_Point;
-      if (score > scoreD) { scoreD = score; bestDemand = mid; }
-   }
+string BiasToString(ENUM_BIAS bias)
+{
+    switch(bias)
+    {
+        case BIAS_BULL: return "BULL";
+        case BIAS_BEAR: return "BEAR";
+        case BIAS_NEUTRAL: return "NEUTRAL";
+    }
+    return "N/A";
+}
 
-   for (int i=0; i < ArraySize(supplyZones); i++)
-   {
-      if (ObjectFind(0, supplyZones[i]) < 0) continue;
-      double p1 = ObjectGetDouble(0, supplyZones[i], OBJPROP_PRICE, 0);
-      double p2 = ObjectGetDouble(0, supplyZones[i], OBJPROP_PRICE, 1);
-      double mid = (p1 + p2) / 2;
-      double dist = MathAbs(bid - mid);
-      double width = MathAbs(p1 - p2);
-      double score = 1000 - dist/_Point - width/_Point;
-      if (score > scoreS) { scoreS = score; bestSupply = mid; }
-   }
+color BiasToColor(ENUM_BIAS bias)
+{
+    switch(bias)
+    {
+        case BIAS_BULL: return COLOR_BULL;
+        case BIAS_BEAR: return COLOR_BEAR;
+        case BIAS_NEUTRAL: return COLOR_NEUTRAL;
+    }
+    return COLOR_NEUTRAL;
+}
 
-   bool useDemand = (scoreD >= scoreS);
-   direction = useDemand ? "Demand" : "Supply";
-   strength  = "";
-   eta       = "~";
-   return(useDemand ? bestDemand : bestSupply);
+string ZoneToString(ENUM_ZONE zone)
+{
+    switch(zone)
+    {
+        case ZONE_DEMAND: return "Demand";
+        case ZONE_SUPPLY: return "Supply";
+        case ZONE_NONE: return "None";
+    }
+    return "N/A";
+}
+
+color ZoneToColor(ENUM_ZONE zone)
+{
+    switch(zone)
+    {
+        case ZONE_DEMAND: return COLOR_DEMAND;
+        case ZONE_SUPPLY: return COLOR_SUPPLY;
+        case ZONE_NONE: return COLOR_NEUTRAL;
+    }
+    return COLOR_NEUTRAL;
 }
 //+------------------------------------------------------------------+
