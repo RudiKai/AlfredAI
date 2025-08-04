@@ -50,6 +50,15 @@ struct SignalData
 {
     ENUM_BIAS direction;
     double    confidence; // 0.0 to 100.0
+
+    // Copy constructor to resolve compiler warning
+    SignalData(const SignalData &other)
+    {
+        direction = other.direction;
+        confidence = other.confidence;
+    }
+    // Default constructor
+    SignalData() {}
 };
 
 
@@ -75,6 +84,7 @@ struct SignalData
 #define COLOR_CONF_HIGH clrSeaGreen
 #define COLOR_CONF_MED clrGoldenrod
 #define COLOR_CONF_LOW clrFireBrick
+#define COLOR_SEPARATOR clrGray
 
 // --- Font Sizes
 #define FONT_SIZE_NORMAL 8
@@ -84,6 +94,7 @@ struct SignalData
 #define SPACING_SMALL 8
 #define SPACING_MEDIUM 16
 #define SPACING_LARGE 24
+#define SPACING_SEPARATOR 12
 
 // --- Indicator Handles
 int hATR_current; // ATR for the current timeframe
@@ -107,42 +118,42 @@ double g_pip_value;
 //+------------------------------------------------------------------+
 ENUM_BIAS GetCompassBiasTF(string tf)
 {
-    // --- PLACEHOLDER LOGIC ---
-    // In a real scenario, this would call iCustom() to get data from your Compass indicator.
-    // The random values simulate a noisy signal that needs stabilization.
-    double random_val = MathRand() / 32767.0;
-    if(random_val > 0.66) return BIAS_BULL;
-    if(random_val < 0.33) return BIAS_BEAR;
+    // --- STABLE MOCK DATA ---
+    // Returns a fixed bias for each timeframe for consistent testing.
+    if(tf == "M1" || tf == "M5") return BIAS_BULL;
+    if(tf == "M15" || tf == "H1") return BIAS_BULL;
+    if(tf == "H4") return BIAS_BEAR;
+    if(tf == "D1") return BIAS_BULL;
+    
     return BIAS_NEUTRAL;
 }
 
 ENUM_ZONE GetZoneStatus()
 {
-    // --- PLACEHOLDER LOGIC ---
-    double random_val = MathRand() / 32767.0;
-    if(random_val > 0.66) return ZONE_DEMAND;
-    if(random_val < 0.33) return ZONE_SUPPLY;
-    return ZONE_NONE;
+    // --- STABLE MOCK DATA ---
+    // Consistently returns Demand for testing.
+    return ZONE_DEMAND;
 }
 
 TradeSetup GetTradeSetup()
 {
-    // --- PLACEHOLDER LOGIC ---
+    // --- STABLE MOCK DATA ---
     TradeSetup setup;
     double current_price = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
     setup.entry = current_price;
     setup.sl = current_price - 500 * SymbolInfoDouble(_Symbol, SYMBOL_POINT);
     setup.tp = current_price + 1000 * SymbolInfoDouble(_Symbol, SYMBOL_POINT);
-    setup.is_ready = (MathRand() > 16384);
+    setup.is_ready = true; // Default to ready for consistent display
     return setup;
 }
 
 SignalData GetSignalData()
 {
-    // --- PLACEHOLDER LOGIC ---
+    // --- STABLE MOCK DATA ---
+    // Returns a static BUY signal with 85% confidence.
     SignalData data;
-    data.direction = (MathRand() > 16384) ? BIAS_BULL : BIAS_BEAR;
-    data.confidence = (MathRand() / 32767.0) * 100.0;
+    data.direction = BIAS_BULL;
+    data.confidence = 85.0;
     return data;
 }
 
@@ -229,7 +240,7 @@ void CreateLabel(string name, string text, int x, int y, color clr, int font_siz
 }
 
 //+------------------------------------------------------------------+
-//| Helper to create a rectangle label (for confidence bar)          |
+//| Helper to create a rectangle label (for bars and separators)     |
 //+------------------------------------------------------------------+
 void CreateRectangle(string name, int x, int y, int width, int height, color clr, ENUM_BORDER_TYPE border=BORDER_FLAT)
 {
@@ -285,12 +296,15 @@ void CreatePanel()
         string tfs[] = {"M1", "M5", "M15", "H1", "H4", "D1"};
         for(int i=0; i<ArraySize(tfs); i++)
         {
-            CreateLabel("biases_"+tfs[i]+"_prefix", tfs[i]+":", x_bias_prefix, y_offset, COLOR_HEADER);
-            CreateLabel("biases_"+tfs[i]+"_value", "-", x_bias_value, y_offset, COLOR_NEUTRAL);
+            CreateLabel("biases_"+tfs[i]+"_prefix", tfs[i]+":", x_bias_prefix, y_offset, COLOR_HEADER, FONT_SIZE_NORMAL);
+            CreateLabel("biases_"+tfs[i]+"_value", "-", x_bias_value, y_offset, COLOR_NEUTRAL, FONT_SIZE_NORMAL);
             y_offset += SPACING_MEDIUM;
         }
     }
-    y_offset += SPACING_LARGE - (g_biases_expanded ? SPACING_MEDIUM : 0);
+    y_offset += SPACING_SEPARATOR - (g_biases_expanded ? SPACING_MEDIUM : 0);
+    CreateRectangle("sep1", x_offset, y_offset, PANE_WIDTH - 20, 1, COLOR_SEPARATOR, BORDER_FLAT);
+    y_offset += SPACING_SEPARATOR;
+
 
     // --- HUD Metrics Section
     CreateLabel("hud_header", "HUD Metrics", x_offset, y_offset, COLOR_HEADER, FONT_SIZE_HEADER);
@@ -298,49 +312,55 @@ void CreatePanel()
     y_offset += SPACING_MEDIUM;
     if(g_hud_expanded)
     {
-        CreateLabel("hud_spread", "Spread:", x_col2_prefix, y_offset, COLOR_HEADER);
-        CreateLabel("hud_spread_val", "-", x_col2_value, y_offset, COLOR_NEUTRAL);
+        CreateLabel("hud_spread", "Spread:", x_col2_prefix, y_offset, COLOR_HEADER, FONT_SIZE_NORMAL);
+        CreateLabel("hud_spread_val", "-", x_col2_value, y_offset, COLOR_NEUTRAL, FONT_SIZE_NORMAL);
         y_offset += SPACING_MEDIUM;
-        CreateLabel("hud_atr", "ATR ("+IntegerToString(atr_period)+"):", x_col2_prefix, y_offset, COLOR_HEADER);
-        CreateLabel("hud_atr_val", "-", x_col2_value, y_offset, COLOR_NEUTRAL);
+        CreateLabel("hud_atr", "ATR ("+IntegerToString(atr_period)+"):", x_col2_prefix, y_offset, COLOR_HEADER, FONT_SIZE_NORMAL);
+        CreateLabel("hud_atr_val", "-", x_col2_value, y_offset, COLOR_NEUTRAL, FONT_SIZE_NORMAL);
     }
-    y_offset += SPACING_LARGE - (g_hud_expanded ? SPACING_MEDIUM : 0);
+    y_offset += SPACING_SEPARATOR - (g_hud_expanded ? SPACING_MEDIUM : 0);
+    CreateRectangle("sep2", x_offset, y_offset, PANE_WIDTH - 20, 1, COLOR_SEPARATOR, BORDER_FLAT);
+    y_offset += SPACING_SEPARATOR;
 
     // --- Final Signal Section
     CreateLabel("signal_header", "Final Signal", x_offset, y_offset, COLOR_HEADER, FONT_SIZE_HEADER);
     y_offset += SPACING_MEDIUM;
-    CreateLabel("signal_dir_prefix", "Signal:", x_col2_prefix, y_offset, COLOR_HEADER);
-    CreateLabel("signal_dir_value", "-", x_col2_value, y_offset, COLOR_NEUTRAL);
+    CreateLabel("signal_dir_prefix", "Signal:", x_col2_prefix, y_offset, COLOR_HEADER, FONT_SIZE_NORMAL);
+    CreateLabel("signal_dir_value", "-", x_col2_value, y_offset, COLOR_NEUTRAL, FONT_SIZE_NORMAL);
     y_offset += SPACING_MEDIUM;
-    CreateLabel("signal_conf_prefix", "Confidence:", x_col2_prefix, y_offset, COLOR_HEADER);
-    CreateLabel("signal_conf_value", "-", x_col2_value + 60, y_offset, COLOR_NEUTRAL);
-    CreateRectangle("signal_conf_bar_bg", x_col2_value, y_offset, CONFIDENCE_BAR_MAX_WIDTH, 10, clrGray);
-    CreateRectangle("signal_conf_bar_fg", x_col2_value, y_offset, 0, 10, clrNONE); // Starts with 0 width
+    CreateLabel("signal_conf_prefix", "Confidence:", x_col2_prefix, y_offset, COLOR_HEADER, FONT_SIZE_NORMAL);
+    CreateLabel("signal_conf_value", "-", x_col2_value + 60, y_offset, COLOR_NEUTRAL, FONT_SIZE_NORMAL);
+    CreateRectangle("signal_conf_bar_bg", x_col2_value, y_offset, CONFIDENCE_BAR_MAX_WIDTH, 10, clrGray, BORDER_FLAT);
+    CreateRectangle("signal_conf_bar_fg", x_col2_value, y_offset, 0, 10, clrNONE, BORDER_FLAT); // Starts with 0 width
     y_offset += SPACING_MEDIUM;
-    CreateLabel("magnet_zone_prefix", "Magnet Zone:", x_col2_prefix, y_offset, COLOR_HEADER);
-    CreateLabel("magnet_zone_value", "-", x_col2_value, y_offset, COLOR_NEUTRAL);
-    y_offset += SPACING_LARGE;
+    CreateLabel("magnet_zone_prefix", "Magnet Zone:", x_col2_prefix, y_offset, COLOR_HEADER, FONT_SIZE_NORMAL);
+    CreateLabel("magnet_zone_value", "-", x_col2_value, y_offset, COLOR_NEUTRAL, FONT_SIZE_NORMAL);
+    y_offset += SPACING_SEPARATOR;
+    CreateRectangle("sep3", x_offset, y_offset, PANE_WIDTH - 20, 1, COLOR_SEPARATOR, BORDER_FLAT);
+    y_offset += SPACING_SEPARATOR;
 
     // --- Trade Now Section
     CreateLabel("trade_header", "Trade Now", x_offset, y_offset, COLOR_HEADER, FONT_SIZE_HEADER);
     y_offset += SPACING_MEDIUM;
-    CreateLabel("trade_entry_prefix", "Entry:", x_col2_prefix, y_offset, COLOR_HEADER);
-    CreateLabel("trade_entry_value", "-", x_col2_value, y_offset, COLOR_NEUTRAL);
+    CreateLabel("trade_entry_prefix", "Entry:", x_col2_prefix, y_offset, COLOR_HEADER, FONT_SIZE_NORMAL);
+    CreateLabel("trade_entry_value", "-", x_col2_value, y_offset, COLOR_NEUTRAL, FONT_SIZE_NORMAL);
     y_offset += SPACING_MEDIUM;
-    CreateLabel("trade_tp_prefix", "TP:", x_col2_prefix, y_offset, COLOR_HEADER);
-    CreateLabel("trade_tp_value", "-", x_col2_value, y_offset, COLOR_NEUTRAL);
+    CreateLabel("trade_tp_prefix", "TP:", x_col2_prefix, y_offset, COLOR_HEADER, FONT_SIZE_NORMAL);
+    CreateLabel("trade_tp_value", "-", x_col2_value, y_offset, COLOR_NEUTRAL, FONT_SIZE_NORMAL);
     y_offset += SPACING_MEDIUM;
-    CreateLabel("trade_sl_prefix", "SL:", x_col2_prefix, y_offset, COLOR_HEADER);
-    CreateLabel("trade_sl_value", "-", x_col2_value, y_offset, COLOR_NEUTRAL);
+    CreateLabel("trade_sl_prefix", "SL:", x_col2_prefix, y_offset, COLOR_HEADER, FONT_SIZE_NORMAL);
+    CreateLabel("trade_sl_value", "-", x_col2_value, y_offset, COLOR_NEUTRAL, FONT_SIZE_NORMAL);
     y_offset += SPACING_MEDIUM;
-    CreateLabel("trade_status_prefix", "Status:", x_col2_prefix, y_offset, COLOR_HEADER);
-    CreateLabel("trade_status_value", "☐ Not Ready", x_col2_value, y_offset, COLOR_NEUTRAL);
-    y_offset += SPACING_LARGE;
+    CreateLabel("trade_status_prefix", "Status:", x_col2_prefix, y_offset, COLOR_HEADER, FONT_SIZE_NORMAL);
+    CreateLabel("trade_status_value", "☐ Not Ready", x_col2_value, y_offset, COLOR_NEUTRAL, FONT_SIZE_NORMAL);
+    y_offset += SPACING_SEPARATOR;
+    CreateRectangle("sep4", x_offset, y_offset, PANE_WIDTH - 20, 1, COLOR_SEPARATOR, BORDER_FLAT);
+    y_offset += SPACING_SEPARATOR;
 
     // --- Alfred Says Section
     CreateLabel("alfred_header", "Alfred Says:", x_offset, y_offset, COLOR_HEADER, FONT_SIZE_HEADER);
     y_offset += SPACING_MEDIUM;
-    CreateLabel("alfred_says",   "Thinking...", x_offset, y_offset, COLOR_ALFRED_MSG);
+    CreateLabel("alfred_says",   "Thinking...", x_offset, y_offset, COLOR_ALFRED_MSG, FONT_SIZE_NORMAL);
     y_offset += SPACING_MEDIUM;
 
     // --- Create the main background with dynamic height
@@ -370,7 +390,6 @@ void UpdatePanel()
         {
             ENUM_BIAS current_raw_bias = GetCompassBiasTF(tfs[i]);
 
-            // Debouncing/Confirmation Logic
             if(current_raw_bias == g_pending_bias[i])
             {
                 g_confirmation_count[i]++;
@@ -381,23 +400,21 @@ void UpdatePanel()
                 g_confirmation_count[i] = 1;
             }
             
-            // Check if bias is confirmed
             if(g_confirmation_count[i] >= BIAS_CONFIRMATION_COUNT)
             {
                 ENUM_BIAS confirmed_bias = g_pending_bias[i];
                 
-                // "Sticky" Neutral Logic: Only update the display for a strong signal
-                // And only if it's different from the last displayed strong signal.
                 if(confirmed_bias != BIAS_NEUTRAL && confirmed_bias != g_last_displayed_bias[i])
                 {
                     g_last_displayed_bias[i] = confirmed_bias;
                     UpdateLabel("biases_"+tfs[i]+"_value", BiasToString(g_last_displayed_bias[i]), BiasToColor(g_last_displayed_bias[i]));
                 }
+                // If a neutral signal is confirmed, we don't update the UI, keeping the last strong signal.
             }
         }
     }
 
-    // --- Update other sections as before
+    // --- Update other sections
     if(g_hud_expanded)
     {
         long spread_points = SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
