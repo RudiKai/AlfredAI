@@ -1,6 +1,7 @@
 //+------------------------------------------------------------------+
 //|                       AlfredSupDemCore™                         |
 //|      Structural Supply/Demand zone generator for Alfred Suite    |
+//|                (FIXED: Self-Contained Version)                   |
 //+------------------------------------------------------------------+
 #property indicator_chart_window
 #property strict
@@ -10,7 +11,7 @@
 #property indicator_label1  "AlfredSupDemCore™"
 
 #include <AlfredSettings.mqh>
-#include <AlfredInit.mqh>
+// #include <AlfredInit.mqh> // Removed for self-containment
 
 SAlfred Alfred;
 
@@ -22,8 +23,21 @@ double zoneBuffer[];
 //+------------------------------------------------------------------+
 int OnInit()
 {
-   // load all your defaults from AlfredInit.mqh
-   InitAlfredDefaults();
+   // --- Start: Manually set defaults (replaces InitAlfredDefaults) ---
+   Alfred.supdemZoneLookback         = 50;
+   Alfred.supdemZoneDurationBars     = 100;
+   Alfred.supdemMinImpulseMovePips   = 20.0;
+   Alfred.supdemDemandColorHTF       = clrLightGreen;
+   Alfred.supdemDemandColorLTF       = clrGreen;
+   Alfred.supdemSupplyColorHTF       = clrHotPink;
+   Alfred.supdemSupplyColorLTF       = clrRed;
+   Alfred.supdemRefreshRateSeconds   = 30;
+   Alfred.supdemEnableBreakoutRemoval= true;
+   Alfred.supdemRequireBodyClose     = true;
+   Alfred.supdemEnableTimeDecay      = true;
+   Alfred.supdemTimeDecayBars        = 20;
+   Alfred.supdemEnableMagnetForecast = true;
+   // --- End: Manually set defaults ---
 
    // set up dummy buffer
    SetIndexBuffer(0, zoneBuffer, INDICATOR_DATA);
