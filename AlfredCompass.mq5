@@ -1,6 +1,7 @@
 //+------------------------------------------------------------------+
 //|                           AlfredCompass™                         |
 //|                            v1.00                                 |
+//|                (FIXED: Self-Contained Version)                   |
 //+------------------------------------------------------------------+
 #property indicator_chart_window
 #property strict
@@ -10,8 +11,9 @@
 #property indicator_label1  "AlfredCompass™"
 
 #include <AlfredSettings.mqh>
-#include <AlfredInit.mqh>
+// #include <AlfredInit.mqh> // Removed for self-containment
 
+SAlfred Alfred;
 double dummyBuffer[];
 
 // reference timeframes
@@ -22,7 +24,12 @@ ENUM_TIMEFRAMES TFList[] = { PERIOD_M15, PERIOD_H1, PERIOD_H4 };
 //+------------------------------------------------------------------+
 int OnInit()
 {
-   InitAlfredDefaults();                     // load central config
+   // --- Start: Manually set defaults (replaces InitAlfredDefaults) ---
+   Alfred.enableCompass              = true;
+   Alfred.compassYOffset             = 20;
+   Alfred.fontSize                   = 12;
+   // --- End: Manually set defaults ---
+
    SetIndexBuffer(0, dummyBuffer, INDICATOR_DATA);
    ArrayInitialize(dummyBuffer, EMPTY_VALUE);
    return(INIT_SUCCEEDED);
