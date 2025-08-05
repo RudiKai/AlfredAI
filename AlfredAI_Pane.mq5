@@ -1,12 +1,13 @@
 //+------------------------------------------------------------------+
 //|                        AlfredAI_Pane.mq5                         |
-//|             v3.4 - Added Context-Aware Alert Center              |
+//|             v1.0 - Final Version with Footer & Diagnostics       |
 //|                    Copyright 2024, RudiKai                       |
 //|                     https://github.com/RudiKai                   |
 //+------------------------------------------------------------------+
 #property strict
 #property indicator_chart_window
 #property indicator_plots 0 // Suppress "no indicator plot" warning
+#property version "1.0"
 
 // --- Optional Inputs ---
 input bool ShowDebugInfo = false;          // Toggle for displaying debug information
@@ -19,7 +20,8 @@ input bool ShowRiskModule = true;          // Toggle for the Risk & Positioning 
 input bool ShowSessionModule = true;       // Toggle for the Session & Volatility module
 input bool ShowNewsModule = true;          // Toggle for the Upcoming News module
 input bool ShowEmotionalState = true;      // Toggle for the Emotional State module
-input bool ShowAlertCenter = true;         // NEW: Toggle for the Alert Center module
+input bool ShowAlertCenter = true;         // Toggle for the Alert Center module
+input bool ShowPaneSettings = true;        // Toggle for the Pane Settings summary module
 
 // --- Includes
 #include <ChartObjects\ChartObjectsTxtControls.mqh>
@@ -35,7 +37,6 @@ enum ENUM_MATRIX_CONFIDENCE { CONFIDENCE_WEAK, CONFIDENCE_MEDIUM, CONFIDENCE_STR
 enum ENUM_VOLATILITY { VOLATILITY_LOW, VOLATILITY_MEDIUM, VOLATILITY_HIGH };
 enum ENUM_NEWS_IMPACT { IMPACT_LOW, IMPACT_MEDIUM, IMPACT_HIGH };
 enum ENUM_EMOTIONAL_STATE { STATE_CAUTIOUS, STATE_CONFIDENT, STATE_OVEREXTENDED, STATE_ANXIOUS, STATE_NEUTRAL };
-// NEW: Enum for Alert Center status
 enum ENUM_ALERT_STATUS { ALERT_NONE, ALERT_PARTIAL, ALERT_STRONG };
 
 
@@ -48,7 +49,6 @@ struct RiskModuleData { double risk_percent; double position_size; string rr_rat
 struct SessionData { string session_name; string session_overlap; ENUM_VOLATILITY volatility; };
 struct NewsEventData { string time; string currency; string event_name; ENUM_NEWS_IMPACT impact; };
 struct EmotionalStateData { ENUM_EMOTIONAL_STATE state; string text; };
-// NEW: Struct for Alert Center data
 struct AlertData { ENUM_ALERT_STATUS status; string text; };
 
 
@@ -102,6 +102,7 @@ struct AlertData { ENUM_ALERT_STATUS status; string text; };
 #define COLOR_ALERT_STRONG clrLimeGreen
 #define COLOR_ALERT_PARTIAL clrYellow
 #define COLOR_ALERT_NONE clrGray
+#define COLOR_FOOTER clrDarkGray
 
 // --- Font Sizes & Spacing
 #define FONT_SIZE_NORMAL 8
@@ -277,7 +278,6 @@ EmotionalStateData GetEmotionalState()
     return data;
 }
 
-// NEW: Mock function for Alert Center
 AlertData GetAlertCenterStatus()
 {
     AlertData alert;
@@ -374,7 +374,6 @@ color VolatilityToHighlightColor(ENUM_VOLATILITY v) { switch(v) { case VOLATILIT
 string NewsImpactToString(ENUM_NEWS_IMPACT i) { switch(i) { case IMPACT_LOW: return "LOW"; case IMPACT_MEDIUM: return "MEDIUM"; } return "HIGH"; }
 color NewsImpactToColor(ENUM_NEWS_IMPACT i) { switch(i) { case IMPACT_LOW: return COLOR_IMPACT_LOW; case IMPACT_MEDIUM: return COLOR_IMPACT_MEDIUM; } return COLOR_IMPACT_HIGH; }
 color EmotionalStateToColor(ENUM_EMOTIONAL_STATE s) { switch(s) { case STATE_CAUTIOUS: return COLOR_STATE_CAUTIOUS; case STATE_CONFIDENT: return COLOR_STATE_CONFIDENT; case STATE_OVEREXTENDED: return COLOR_STATE_OVEREXTENDED; case STATE_ANXIOUS: return COLOR_STATE_ANXIOUS; } return COLOR_STATE_NEUTRAL; }
-// NEW: Helper for Alert Center
 color AlertStatusToColor(ENUM_ALERT_STATUS s) { switch(s) { case ALERT_STRONG: return COLOR_ALERT_STRONG; case ALERT_PARTIAL: return COLOR_ALERT_PARTIAL; } return COLOR_ALERT_NONE; }
 
 
@@ -438,13 +437,47 @@ void CreatePanel()
         DrawSeparator("sep_emotion", y_offset, x_offset);
     }
     
-    // --- NEW: Alert Center Section ---
+    // --- Alert Center Section
     if(ShowAlertCenter)
     {
         CreateLabel("alert_header", "🚨 ALERT CENTER", x_col1, y_offset, COLOR_HEADER, FONT_SIZE_HEADER); y_offset += SPACING_MEDIUM;
         CreateLabel("alert_status", "---", x_col1, y_offset, COLOR_NA, FONT_SIZE_NORMAL);
         y_offset += SPACING_MEDIUM;
         DrawSeparator("sep_alert", y_offset, x_offset);
+    }
+    
+    // --- Pane Settings Section
+    if(ShowPaneSettings)
+    {
+        CreateLabel("settings_header", "⚙️ PANE SETTINGS", x_col1, y_offset, COLOR_HEADER, FONT_SIZE_HEADER); y_offset += SPACING_MEDIUM;
+        int settings_x1 = x_col1;
+        int settings_x2 = x_col1 + 110;
+        
+        CreateLabel("setting_matrix_prefix", "📊 Bias Matrix:", settings_x1, y_offset, COLOR_HEADER);
+        CreateLabel("setting_matrix_value", "---", settings_x2, y_offset, COLOR_NA);
+        y_offset += SPACING_MEDIUM;
+        
+        CreateLabel("setting_magnet_prefix", "📉 Magnet Summary:", settings_x1, y_offset, COLOR_HEADER);
+        CreateLabel("setting_magnet_value", "---", settings_x2, y_offset, COLOR_NA);
+        y_offset += SPACING_MEDIUM;
+        
+        CreateLabel("setting_heatmap_prefix", "📦 Zone Heatmap:", settings_x1, y_offset, COLOR_HEADER);
+        CreateLabel("setting_heatmap_value", "---", settings_x2, y_offset, COLOR_NA);
+        y_offset += SPACING_MEDIUM;
+        
+        CreateLabel("setting_reco_prefix", "🎯 Trade Signals:", settings_x1, y_offset, COLOR_HEADER);
+        CreateLabel("setting_reco_value", "---", settings_x2, y_offset, COLOR_NA);
+        y_offset += SPACING_MEDIUM;
+        
+        CreateLabel("setting_emotion_prefix", "🧠 Emotion Module:", settings_x1, y_offset, COLOR_HEADER);
+        CreateLabel("setting_emotion_value", "---", settings_x2, y_offset, COLOR_NA);
+        y_offset += SPACING_MEDIUM;
+        
+        CreateLabel("setting_alert_prefix", "🔔 Alert Center:", settings_x1, y_offset, COLOR_HEADER);
+        CreateLabel("setting_alert_value", "---", settings_x2, y_offset, COLOR_NA);
+        y_offset += SPACING_MEDIUM;
+        
+        DrawSeparator("sep_settings", y_offset, x_offset);
     }
 
     // --- TF Biases Section
@@ -616,10 +649,12 @@ void CreatePanel()
     CreateLabel("trade_signal_status", "NO SIGNAL", x_col2, y_offset, COLOR_NO_SIGNAL, FONT_SIZE_SIGNAL);
     y_offset += SPACING_LARGE;
 
-    // --- Debug Info (Optional)
+    // --- Footer & Debug Info ---
+    CreateLabel("footer", "AlfredAI™ Pane · v1.0 · Built for Traders", PANE_X_POS + PANE_WIDTH - 10, y_offset, COLOR_FOOTER, FONT_SIZE_NORMAL - 1, ANCHOR_RIGHT);
+    y_offset += SPACING_MEDIUM;
     if(ShowDebugInfo)
     {
-        CreateLabel("debug_mode", "DEBUG MODE ACTIVE", x_offset, y_offset, COLOR_ALFRED_MSG, FONT_SIZE_NORMAL);
+        CreateLabel("debug_info", "---", x_offset, y_offset, COLOR_TEXT_DIM, FONT_SIZE_NORMAL - 1);
         y_offset += SPACING_MEDIUM;
     }
 
@@ -670,11 +705,25 @@ void UpdatePanel()
         UpdateLabel("emotion_text", emotion_data.text, COLOR_NEUTRAL_TEXT);
     }
     
-    // --- NEW: Update Alert Center ---
+    // --- Update Alert Center
     if(ShowAlertCenter)
     {
         AlertData alert_data = GetAlertCenterStatus();
         UpdateLabel("alert_status", alert_data.text, AlertStatusToColor(alert_data.status));
+    }
+    
+    // --- Update Pane Settings
+    if(ShowPaneSettings)
+    {
+        string on = "✅"; string off = "❌";
+        color on_c = COLOR_BULL; color off_c = COLOR_NO_SIGNAL;
+        
+        UpdateLabel("setting_matrix_value", ShowConfidenceMatrix ? on : off, ShowConfidenceMatrix ? on_c : off_c);
+        UpdateLabel("setting_magnet_value", ShowMultiTFMagnets ? on : off, ShowMultiTFMagnets ? on_c : off_c);
+        UpdateLabel("setting_heatmap_value", ShowZoneHeatmap ? on : off, ShowZoneHeatmap ? on_c : off_c);
+        UpdateLabel("setting_reco_value", ShowTradeRecommendation ? on : off, ShowTradeRecommendation ? on_c : off_c);
+        UpdateLabel("setting_emotion_value", ShowEmotionalState ? on : off, ShowEmotionalState ? on_c : off_c);
+        UpdateLabel("setting_alert_value", ShowAlertCenter ? on : off, ShowAlertCenter ? on_c : off_c);
     }
     
     // --- Update TF Biases
@@ -859,6 +908,25 @@ void UpdatePanel()
     {
         ObjectSetString(0, signal_obj, OBJPROP_FONT, "Arial Bold");
         ObjectSetInteger(0, signal_obj, OBJPROP_FONTSIZE, FONT_SIZE_SIGNAL_ACTIVE);
+    }
+    
+    // --- NEW: Update Debug Info ---
+    if(ShowDebugInfo)
+    {
+        int active_modules = 0;
+        if(ShowZoneHeatmap) active_modules++; if(ShowMagnetProjection) active_modules++;
+        if(ShowMultiTFMagnets) active_modules++; if(ShowConfidenceMatrix) active_modules++;
+        if(ShowTradeRecommendation) active_modules++; if(ShowRiskModule) active_modules++;
+        if(ShowSessionModule) active_modules++; if(ShowNewsModule) active_modules++;
+        if(ShowEmotionalState) active_modules++; if(ShowAlertCenter) active_modules++;
+        if(ShowPaneSettings) active_modules++;
+        
+        string debug_text = StringFormat("Modules Active: %d | %s · %s | Updated: %s",
+                                         active_modules,
+                                         _Symbol,
+                                         EnumToString(_Period),
+                                         TimeToString(TimeCurrent(), TIME_SECONDS));
+        UpdateLabel("debug_info", debug_text);
     }
 
     ChartRedraw();
