@@ -5,10 +5,16 @@
 //+------------------------------------------------------------------+
 #property indicator_chart_window
 #property strict
-#property indicator_buffers 1
-#property indicator_plots   1
+#property indicator_buffers 3
+#property indicator_plots   2
+
 #property indicator_type1   DRAW_NONE
-#property indicator_label1  "AlfredSupDemCore™"
+#property indicator_label1  "ZoneStatus"
+
+#property indicator_type2   DRAW_NONE
+#property indicator_label2  "MagnetLevel"
+
+
 
 #include <AlfredSettings.mqh>
 // #include <AlfredInit.mqh> // Removed for self-containment
@@ -17,6 +23,9 @@ SAlfred Alfred;
 
 
 double zoneBuffer[];
+double zoneStatusBuffer[];   // will store -1, 0, or 1
+double magnetLevelBuffer[];  // optional: stores nearest magnet level
+
 
 //+------------------------------------------------------------------+
 //| Initialization                                                   |
@@ -41,6 +50,8 @@ int OnInit()
 
    // set up dummy buffer
    SetIndexBuffer(0, zoneBuffer, INDICATOR_DATA);
+   ArrayInitialize(zoneBuffer, EMPTY_VALUE);
+   ArrayInitialize(magnetLevelBuffer, 0);
    ArrayInitialize(zoneBuffer, EMPTY_VALUE);
 
    // timer for dynamic redraw
@@ -318,11 +329,67 @@ int OnCalculate(const int rates_total,
                 const long     &v[],
                 const int      &sp[])
 {
-   // redraw every tick
+   // Redraw visual zones and magnet lines
    DrawAllZones();
-   if(Alfred.supdemEnableMagnetForecast)
+   if (Alfred.supdemEnableMagnetForecast)
       DrawMagnetLine();
+
+   // === NEW: Write current zone/magnet status to buffers ===
+   double price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+
+   // Default values
+   int zoneStatus = 0;
+   double closestMagnet = 0;
+   double closestDist = DBL_MAX;
+
+   // Check for active demand/supply zones
+   string zoneNames[] = {
+      "DZone_LTF","SZone_LTF",
+      "DZone_M15","SZone_M15",
+      "DZone_M30","SZone_M30",
+      "DZone_H1","SZone_H1",
+      "DZone_H2","SZone_H2",
+      "DZone_H4","SZone_H4",
+      "DZone_D1","SZone_D1"
+   };
+
+   for(int i=0; i<ArraySize(zoneNames); i++)
+   {
+      string z = zoneNames[i];
+      if(ObjectFind(0, z) >= 0)
+      {
+         double hi = ObjectGetDouble(0, z, OBJPROP_PRICE, 0);
+         double lo = ObjectGetDouble(0, z, OBJPROP_PRICE, 1);
+         double top = MathMax(hi, lo);
+         double bot = MathMin(hi, lo);
+
+         // Check if price is inside this zone
+         if(price >= bot && price <= top)
+         {
+            if(StringFind(z, "DZone") >= 0) zoneStatus = 1;
+            if(StringFind(z, "SZone") >= 0) zoneStatus = -1;
+         }
+      }
+
+      // Also check for magnet line proximity
+      string magnet = "MagnetLine_" + z;
+      if(ObjectFind(0, magnet) >= 0)
+      {
+         double m1 = ObjectGetDouble(0, magnet, OBJPROP_PRICE, 0);
+         double dist = MathAbs(price - m1);
+         if(dist < closestDist)
+         {
+            closestDist = dist;
+            closestMagnet = m1;
+         }
+      }
+   }
+
+   // Write to buffers (at index 0 — live bar)
+   zoneStatusBuffer[0] = zoneStatus;
+   magnetLevelBuffer[0] = closestMagnet;
 
    return(rates_total);
 }
+
 //+------------------------------------------------------------------+
