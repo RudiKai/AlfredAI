@@ -1,6 +1,6 @@
 //+------------------------------------------------------------------+
 //|                        AlfredAI_Pane.mq5                         |
-//|              v1.3 - Finalized Live Data Integration              |
+//|         v1.5 - Finalized SupDem Buffer Integration               |
 //|                                                                  |
 //| Copyright 2024, RudiKai                                          |
 //|                     https://github.com/RudiKai                   |
@@ -8,10 +8,11 @@
 #property strict
 #property indicator_chart_window
 #property indicator_plots 0 // Suppress "no indicator plot" warning
-#property version "1.3"
+#property version "1.5"
 
 // --- Optional Inputs ---
 input bool ShowDebugInfo = false;          // Toggle for displaying debug information
+input bool EnableDebugLogging = false;     // Toggle for printing detailed data fetch logs to the Experts tab
 input bool ShowZoneHeatmap = true;         // Toggle for the Zone Heatmap
 input bool ShowMagnetProjection = true;    // Toggle for the Magnet Projection status
 input bool ShowMultiTFMagnets = true;      // Toggle for the Multi-TF Magnet Summary
@@ -53,7 +54,6 @@ struct AlertData { ENUM_ALERT_STATUS status; string text; };
 
 // --- Structs for Live Data Caching ---
 struct CachedCompassData { ENUM_BIAS bias; double confidence; };
-// Extended to include zone boundaries for interaction checks
 struct CachedSupDemData  { ENUM_ZONE zone; double magnet_level; double zone_p1; double zone_p2; };
 
 // --- Constants for Panel Layout
@@ -74,7 +74,6 @@ struct CachedSupDemData  { ENUM_ZONE zone; double magnet_level; double zone_p1; 
 #define COLOR_NEUTRAL_BIAS clrGoldenrod
 #define COLOR_HEADER clrSilver
 #define COLOR_TOGGLE clrLightGray
-#define COLOR_ALFRED_MSG clrLightYellow
 #define COLOR_DEMAND clrLimeGreen
 #define COLOR_SUPPLY clrOrangeRed
 #define COLOR_CONF_HIGH clrLimeGreen
@@ -143,74 +142,78 @@ CachedSupDemData  g_supdem_cache[7];
 // This function is called once per timer tick to update all external indicator data
 void UpdateLiveDataCaches()
 {
+    if(EnableDebugLogging) Print("--- AlfredPane: Updating Live Data Caches ---");
+
     for(int i = 0; i < ArraySize(g_timeframes); i++)
     {
         ENUM_TIMEFRAMES tf = g_timeframes[i];
+        string tf_str = g_timeframe_strings[i];
 
-        // --- Cache AlfredCompass Data (Bias & Confidence) ---
+        // --- Cache AlfredCompass Data (Bias & Confidence) via iCustom ---
         int compass_handle = iCustom(_Symbol, tf, "AlfredCompass.ex5");
         if(compass_handle != INVALID_HANDLE)
         {
             double bias_buffer[1], conf_buffer[1];
-            // Buffer 0 for Bias (1=Bull, -1=Bear), Buffer 1 for Confidence
-            if(CopyBuffer(compass_handle, 0, 0, 1, bias_buffer) > 0 &&
-               CopyBuffer(compass_handle, 1, 0, 1, conf_buffer) > 0)
+            if(CopyBuffer(compass_handle, 0, 0, 1, bias_buffer) > 0 && CopyBuffer(compass_handle, 1, 0, 1, conf_buffer) > 0)
             {
                 if(bias_buffer[0] > 0.5) g_compass_cache[i].bias = BIAS_BULL;
                 else if(bias_buffer[0] < -0.5) g_compass_cache[i].bias = BIAS_BEAR;
                 else g_compass_cache[i].bias = BIAS_NEUTRAL;
                 g_compass_cache[i].confidence = conf_buffer[0];
+                if(EnableDebugLogging) PrintFormat("PaneCache: Compass %s -> Bias: %s, Conf: %.1f", tf_str, EnumToString(g_compass_cache[i].bias), g_compass_cache[i].confidence);
             }
-            else // Fallback on copy error
-            {
-                g_compass_cache[i].bias = BIAS_NEUTRAL;
-                g_compass_cache[i].confidence = 0;
+            else {
+                g_compass_cache[i].bias = BIAS_NEUTRAL; g_compass_cache[i].confidence = 0;
+                if(EnableDebugLogging) PrintFormat("PaneCache: Compass %s -> FAILED to copy buffers", tf_str);
             }
         }
-        else // Fallback on handle error
-        {
-            g_compass_cache[i].bias = BIAS_NEUTRAL;
-            g_compass_cache[i].confidence = 0;
+        else {
+            g_compass_cache[i].bias = BIAS_NEUTRAL; g_compass_cache[i].confidence = 0;
+            if(EnableDebugLogging) PrintFormat("PaneCache: Compass %s -> INVALID_HANDLE", tf_str);
         }
 
-        // --- Cache AlfredSupDemCore Data (Zone, Magnet, and Boundaries) ---
-        // Assumption: AlfredSupDemCore.ex5 uses buffers as follows:
-        // 0: Zone Type (1=Demand, -1=Supply)
-        // 1: Magnet Level (Midpoint price)
-        // 2: Zone Price 1 (e.g., High of zone)
-        // 3: Zone Price 2 (e.g., Low of zone)
+        // --- Cache AlfredSupDemCore Data (Zones & Magnets) via iCustom Buffers ---
+        // This logic assumes SupDemCore now publishes its data to indicator buffers.
+        // Buffer 0: Zone Type (1=Demand, -1=Supply)
+        // Buffer 1: Magnet Level (Midpoint price)
+        // Buffer 2: Zone Price 1 (High)
+        // Buffer 3: Zone Price 2 (Low)
         int supdem_handle = iCustom(_Symbol, tf, "AlfredSupDemCore.ex5");
         if(supdem_handle != INVALID_HANDLE)
         {
             double zone_buffer[1], magnet_buffer[1], p1_buffer[1], p2_buffer[1];
             
+            // Reset cache before attempting to fill
+            g_supdem_cache[i].zone = ZONE_NONE;
+            g_supdem_cache[i].magnet_level = 0.0;
+            g_supdem_cache[i].zone_p1 = 0.0;
+            g_supdem_cache[i].zone_p2 = 0.0;
+
             // Buffer 0: Zone Type
             if(CopyBuffer(supdem_handle, 0, 0, 1, zone_buffer) > 0)
             {
                 if(zone_buffer[0] > 0.5) g_supdem_cache[i].zone = ZONE_DEMAND;
                 else if(zone_buffer[0] < -0.5) g_supdem_cache[i].zone = ZONE_SUPPLY;
-                else g_supdem_cache[i].zone = ZONE_NONE;
-            } else { g_supdem_cache[i].zone = ZONE_NONE; }
+            }
             
             // Buffer 1: Magnet Level
             if(CopyBuffer(supdem_handle, 1, 0, 1, magnet_buffer) > 0)
             {
                 g_supdem_cache[i].magnet_level = magnet_buffer[0];
-            } else { g_supdem_cache[i].magnet_level = 0.0; }
+            }
 
-            // Buffer 2 & 3: Zone Boundaries
+            // Buffer 2 & 3: Zone Boundaries for interaction checks
             if(CopyBuffer(supdem_handle, 2, 0, 1, p1_buffer) > 0 && CopyBuffer(supdem_handle, 3, 0, 1, p2_buffer) > 0)
             {
                 g_supdem_cache[i].zone_p1 = p1_buffer[0];
                 g_supdem_cache[i].zone_p2 = p2_buffer[0];
-            } else { g_supdem_cache[i].zone_p1 = 0.0; g_supdem_cache[i].zone_p2 = 0.0; }
+            }
+            
+            if(EnableDebugLogging) PrintFormat("PaneCache: SupDem %s -> Zone: %s, Magnet: %.5f", tf_str, EnumToString(g_supdem_cache[i].zone), g_supdem_cache[i].magnet_level);
         }
-        else // Fallback on handle error
+        else
         {
-            g_supdem_cache[i].zone = ZONE_NONE;
-            g_supdem_cache[i].magnet_level = 0.0;
-            g_supdem_cache[i].zone_p1 = 0.0;
-            g_supdem_cache[i].zone_p2 = 0.0;
+             if(EnableDebugLogging) PrintFormat("PaneCache: SupDem %s -> INVALID_HANDLE", tf_str);
         }
     }
 }
@@ -814,7 +817,7 @@ void CreatePanel()
     y_offset += SPACING_LARGE;
     
     // --- Footer & Debug Info ---
-    CreateLabel("footer", "AlfredAI™ Pane · v1.3 · Built for Traders", PANE_X_POS + PANE_WIDTH - 10, y_offset, COLOR_FOOTER, FONT_SIZE_NORMAL - 1, ANCHOR_RIGHT);
+    CreateLabel("footer", "AlfredAI™ Pane · v1.4 · Built for Traders", PANE_X_POS + PANE_WIDTH - 10, y_offset, COLOR_FOOTER, FONT_SIZE_NORMAL - 1, ANCHOR_RIGHT);
     y_offset += SPACING_MEDIUM;
     if(ShowDebugInfo)
     {
@@ -1051,11 +1054,12 @@ void UpdatePanel()
     if(trade_data.trade_exists)
     {
         UpdateLabel("trade_entry_value", StringFormat(price_format, trade_data.entry), COLOR_NEUTRAL_TEXT);
-        double sl_pips = -CalculatePips(trade_data.entry, trade_data.sl);
-        double tp_pips = CalculatePips(trade_data.entry, trade_data.tp);
-        string sl_text = StringFormat(price_format, trade_data.sl) + StringFormat(" (%.1f p)", sl_pips);
-        string tp_text = StringFormat(price_format, trade_data.tp) + StringFormat(" (+%.1f p)", tp_pips);
-        UpdateLabel("trade_sl_value", sl_text, COLOR_NEUTRAL_TEXT); UpdateLabel("trade_tp_value", tp_text, COLOR_NEUTRAL_TEXT);
+        double sl_pips = (trade_data.sl > 0) ? CalculatePips(trade_data.entry, trade_data.sl) : 0.0;
+        double tp_pips = (trade_data.tp > 0) ? CalculatePips(trade_data.entry, trade_data.tp) : 0.0;
+        string sl_text = (trade_data.sl > 0) ? StringFormat(price_format, trade_data.sl) + StringFormat(" (-%.1f p)", sl_pips) : "---";
+        string tp_text = (trade_data.tp > 0) ? StringFormat(price_format, trade_data.tp) + StringFormat(" (+%.1f p)", tp_pips) : "---";
+        UpdateLabel("trade_sl_value", sl_text, COLOR_BEAR); 
+        UpdateLabel("trade_tp_value", tp_text, COLOR_BULL);
         UpdateLabel("trade_status_value", "☑ Active", COLOR_BULL);
     }
     else
@@ -1131,6 +1135,8 @@ int OnInit()
     }
 
     RedrawPanel();
+    UpdateLiveDataCaches(); // Initial data load to prevent "N/A" on first view
+    UpdatePanel();
     EventSetTimer(1); // Set timer to 1-second intervals
     return(INIT_SUCCEEDED);
 }
