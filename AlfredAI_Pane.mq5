@@ -1,6 +1,6 @@
 //+------------------------------------------------------------------+
 //|                        AlfredAI_Pane.mq5                         |
-//|             v2.8 - Added Confidence Matrix Section               |
+//|           v3.0 - Added Risk & Position Sizing Module             |
 //|                    Copyright 2024, RudiKai                       |
 //|                     https://github.com/RudiKai                   |
 //+------------------------------------------------------------------+
@@ -13,7 +13,9 @@ input bool ShowDebugInfo = false;          // Toggle for displaying debug inform
 input bool ShowZoneHeatmap = true;         // Toggle for the Zone Heatmap
 input bool ShowMagnetProjection = true;    // Toggle for the Magnet Projection status
 input bool ShowMultiTFMagnets = true;      // Toggle for the Multi-TF Magnet Summary
-input bool ShowConfidenceMatrix = true;    // NEW: Toggle for the Confidence Matrix
+input bool ShowConfidenceMatrix = true;    // Toggle for the Confidence Matrix
+input bool ShowTradeRecommendation = true; // Toggle for the Trade Recommendation
+input bool ShowRiskModule = true;          // NEW: Toggle for the Risk & Positioning module
 
 // --- Includes
 #include <ChartObjects\ChartObjectsTxtControls.mqh>
@@ -25,14 +27,15 @@ enum ENUM_ZONE_INTERACTION { INTERACTION_DEMAND, INTERACTION_SUPPLY, INTERACTION
 enum ENUM_TRADE_SIGNAL { SIGNAL_NONE, SIGNAL_BUY, SIGNAL_SELL };
 enum ENUM_HEATMAP_STATUS { HEATMAP_NONE, HEATMAP_DEMAND, HEATMAP_SUPPLY };
 enum ENUM_MAGNET_RELATION { RELATION_ABOVE, RELATION_BELOW, RELATION_AT };
-// NEW: Enum for Matrix Confidence Score
 enum ENUM_MATRIX_CONFIDENCE { CONFIDENCE_WEAK, CONFIDENCE_MEDIUM, CONFIDENCE_STRONG };
 
 // --- Structs for Data Handling
 struct LiveTradeData { bool trade_exists; double entry, sl, tp; };
 struct CompassData { ENUM_BIAS bias; double confidence; };
-// NEW: Struct for Confidence Matrix row data
 struct MatrixRowData { ENUM_BIAS bias; ENUM_ZONE zone; ENUM_MAGNET_RELATION magnet; ENUM_MATRIX_CONFIDENCE score; };
+struct TradeRecommendation { ENUM_TRADE_SIGNAL action; string reasoning; };
+// NEW: Struct for Risk Module data
+struct RiskModuleData { double risk_percent; double position_size; string rr_ratio; };
 
 
 // --- Constants for Panel Layout
@@ -91,7 +94,6 @@ string g_heatmap_tf_strings[] = {"M15", "H1", "H4", "D1"};
 ENUM_TIMEFRAMES g_heatmap_tfs[] = {PERIOD_M15, PERIOD_H1, PERIOD_H4, PERIOD_D1};
 string g_magnet_summary_tf_strings[] = {"M15", "H1", "H4", "D1"};
 ENUM_TIMEFRAMES g_magnet_summary_tfs[] = {PERIOD_M15, PERIOD_H1, PERIOD_H4, PERIOD_D1};
-// NEW: Timeframes for the Confidence Matrix
 string g_matrix_tf_strings[] = {"M15", "H1", "H4", "D1"};
 ENUM_TIMEFRAMES g_matrix_tfs[] = {PERIOD_M15, PERIOD_H1, PERIOD_H4, PERIOD_D1};
 
@@ -131,32 +133,65 @@ ENUM_MAGNET_RELATION GetMagnetRelationTF(double price, double magnet) {
    return RELATION_AT;
 }
 
-// NEW: Mock function for Confidence Matrix data
 MatrixRowData GetConfidenceMatrixRow(ENUM_TIMEFRAMES tf)
 {
     MatrixRowData data;
-    
-    // 1. Get data from existing mock functions
     data.bias = GetCompassData(tf).bias;
     data.zone = GetZoneStatus(tf);
     data.magnet = GetMagnetRelationTF(SymbolInfoDouble(_Symbol, SYMBOL_BID), GetMagnetLevelTF(tf));
-
-    // 2. Calculate alignment score
     int score = 0;
-    if(data.bias == BIAS_BULL && data.zone == ZONE_DEMAND) score++;
-    if(data.bias == BIAS_BULL && data.magnet == RELATION_ABOVE) score++;
-    if(data.bias == BIAS_BEAR && data.zone == ZONE_SUPPLY) score++;
-    if(data.bias == BIAS_BEAR && data.magnet == RELATION_BELOW) score++;
-    
-    // A third alignment check (zone and magnet)
+    if(data.bias == BIAS_BULL && (data.zone == ZONE_DEMAND || data.magnet == RELATION_ABOVE)) score++;
+    if(data.bias == BIAS_BEAR && (data.zone == ZONE_SUPPLY || data.magnet == RELATION_BELOW)) score++;
     if(data.zone == ZONE_DEMAND && data.magnet == RELATION_ABOVE) score++;
     if(data.zone == ZONE_SUPPLY && data.magnet == RELATION_BELOW) score++;
-
-    // 3. Assign confidence level
     if(score >= 2) data.score = CONFIDENCE_STRONG;
     else if (score == 1) data.score = CONFIDENCE_MEDIUM;
     else data.score = CONFIDENCE_WEAK;
+    return data;
+}
 
+TradeRecommendation GetTradeRecommendation()
+{
+    TradeRecommendation rec;
+    rec.action = SIGNAL_NONE;
+    rec.reasoning = "Mixed Signals";
+    int strong_bullish_tfs = 0;
+    int strong_bearish_tfs = 0;
+    for(int i = 0; i < ArraySize(g_matrix_tfs); i++)
+    {
+        MatrixRowData row = GetConfidenceMatrixRow(g_matrix_tfs[i]);
+        if(row.score == CONFIDENCE_STRONG)
+        {
+            if(row.bias == BIAS_BULL) strong_bullish_tfs++;
+            if(row.bias == BIAS_BEAR) strong_bearish_tfs++;
+        }
+    }
+    if(strong_bullish_tfs >= 2)
+    {
+        rec.action = SIGNAL_BUY;
+        rec.reasoning = "Strong Multi-TF Bullish Alignment";
+    }
+    else if(strong_bearish_tfs >= 2)
+    {
+        rec.action = SIGNAL_SELL;
+        rec.reasoning = "Strong Multi-TF Bearish Alignment";
+    }
+    return rec;
+}
+
+// NEW: Mock function for Risk Module
+RiskModuleData GetRiskModuleData()
+{
+    RiskModuleData data;
+    data.risk_percent = 1.0;
+    data.position_size = 0.10;
+    int rand_val = MathRand() % 3;
+    switch(rand_val)
+    {
+        case 0: data.rr_ratio = "1 : 1.5"; break;
+        case 1: data.rr_ratio = "1 : 2.0"; break;
+        default: data.rr_ratio = "1 : 3.0"; break;
+    }
     return data;
 }
 
@@ -216,8 +251,9 @@ string MagnetRelationToString(ENUM_MAGNET_RELATION r) { switch(r) { case RELATIO
 color  MagnetRelationToColor(ENUM_MAGNET_RELATION r) { switch(r) { case RELATION_ABOVE: return COLOR_BULL; case RELATION_BELOW: return COLOR_BEAR; } return COLOR_MAGNET_AT; }
 string MagnetRelationTFToString(ENUM_MAGNET_RELATION r) { switch(r) { case RELATION_ABOVE: return "Above"; case RELATION_BELOW: return "Below"; } return "At"; }
 color  MagnetRelationTFToColor(ENUM_MAGNET_RELATION r) { switch(r) { case RELATION_ABOVE: return COLOR_BULL; case RELATION_BELOW: return COLOR_BEAR; } return COLOR_MAGNET_AT; }
-// NEW: Helpers for Confidence Matrix
 color MatrixScoreToColor(ENUM_MATRIX_CONFIDENCE s) { switch(s) { case CONFIDENCE_STRONG: return COLOR_MATRIX_STRONG; case CONFIDENCE_MEDIUM: return COLOR_MATRIX_MEDIUM; } return COLOR_MATRIX_WEAK; }
+string RecoActionToString(ENUM_TRADE_SIGNAL s) { switch(s) { case SIGNAL_BUY: return "BUY"; case SIGNAL_SELL: return "SELL"; } return "WAIT"; }
+color RecoActionToColor(ENUM_TRADE_SIGNAL s) { switch(s) { case SIGNAL_BUY: return COLOR_BULL; case SIGNAL_SELL: return COLOR_BEAR; } return COLOR_NO_SIGNAL; }
 
 
 //+------------------------------------------------------------------+
@@ -319,17 +355,15 @@ void CreatePanel()
         DrawSeparator("sep_mtf_magnet", y_offset, x_offset);
     }
     
-    // --- NEW: Confidence Matrix Section ---
+    // --- Confidence Matrix Section
     if(ShowConfidenceMatrix)
     {
         CreateLabel("matrix_header", "CONFIDENCE MATRIX", x_col1, y_offset, COLOR_HEADER, FONT_SIZE_HEADER); y_offset += SPACING_MEDIUM;
-        // Header Row
         CreateLabel("matrix_hdr_tf", "TF", x_col1, y_offset, COLOR_HEADER);
         CreateLabel("matrix_hdr_bias", "Bias", x_col1 + 40, y_offset, COLOR_HEADER);
         CreateLabel("matrix_hdr_zone", "Zone", x_col1 + 100, y_offset, COLOR_HEADER);
         CreateLabel("matrix_hdr_magnet", "Magnet", x_col1 + 160, y_offset, COLOR_HEADER);
         y_offset += SPACING_MEDIUM;
-        
         for(int i = 0; i < ArraySize(g_matrix_tfs); i++)
         {
             string tf = g_matrix_tf_strings[i];
@@ -342,7 +376,35 @@ void CreatePanel()
         }
         DrawSeparator("sep_matrix", y_offset, x_offset);
     }
-
+    
+    // --- Trade Recommendation Section
+    if(ShowTradeRecommendation)
+    {
+        CreateLabel("reco_header", "TRADE RECOMMENDATION", x_col1, y_offset, COLOR_HEADER, FONT_SIZE_HEADER); y_offset += SPACING_MEDIUM;
+        CreateLabel("reco_action_prefix", "Action:", x_col1, y_offset, COLOR_HEADER);
+        CreateLabel("reco_action_value", "WAIT", x_col1 + 70, y_offset, COLOR_NO_SIGNAL);
+        y_offset += SPACING_MEDIUM;
+        CreateLabel("reco_reason_prefix", "Reason:", x_col1, y_offset, COLOR_HEADER);
+        CreateLabel("reco_reason_value", "---", x_col1 + 70, y_offset, COLOR_NEUTRAL_TEXT);
+        y_offset += SPACING_MEDIUM;
+        DrawSeparator("sep_reco", y_offset, x_offset);
+    }
+    
+    // --- NEW: Risk & Positioning Section ---
+    if(ShowRiskModule)
+    {
+        CreateLabel("risk_header", "RISK & POSITIONING", x_col1, y_offset, COLOR_HEADER, FONT_SIZE_HEADER); y_offset += SPACING_MEDIUM;
+        CreateLabel("risk_pct_prefix", "Risk %:", x_col1, y_offset, COLOR_HEADER, FONT_SIZE_NORMAL);
+        CreateLabel("risk_pct_value", "---", x_col2, y_offset, COLOR_NEUTRAL_TEXT, FONT_SIZE_NORMAL);
+        y_offset += SPACING_MEDIUM;
+        CreateLabel("risk_pos_size_prefix", "Position Size:", x_col1, y_offset, COLOR_HEADER, FONT_SIZE_NORMAL);
+        CreateLabel("risk_pos_size_value", "---", x_col2, y_offset, COLOR_NEUTRAL_TEXT, FONT_SIZE_NORMAL);
+        y_offset += SPACING_MEDIUM;
+        CreateLabel("risk_rr_prefix", "RR Ratio:", x_col1, y_offset, COLOR_HEADER, FONT_SIZE_NORMAL);
+        CreateLabel("risk_rr_value", "---", x_col2, y_offset, COLOR_NEUTRAL_TEXT, FONT_SIZE_NORMAL);
+        y_offset += SPACING_MEDIUM;
+        DrawSeparator("sep_risk", y_offset, x_offset);
+    }
 
     // --- HUD Metrics Section
     CreateLabel("hud_header", "HUD Metrics", x_col1, y_offset, COLOR_HEADER, FONT_SIZE_HEADER);
@@ -462,31 +524,47 @@ void UpdatePanel()
         }
     }
     
-    // --- NEW: Update Confidence Matrix ---
+    // --- Update Confidence Matrix
     if(ShowConfidenceMatrix)
     {
         for(int i = 0; i < ArraySize(g_matrix_tfs); i++)
         {
             ENUM_TIMEFRAMES tf = g_matrix_tfs[i];
             string tf_str = g_matrix_tf_strings[i];
-            
             MatrixRowData data = GetConfidenceMatrixRow(tf);
-            
-            // Update the labels
             UpdateLabel("matrix_bias_"+tf_str, BiasToString(data.bias), BiasToColor(data.bias));
             UpdateLabel("matrix_zone_"+tf_str, ZoneToString(data.zone), ZoneToColor(data.zone));
             UpdateLabel("matrix_magnet_"+tf_str, MagnetRelationTFToString(data.magnet), MagnetRelationTFToColor(data.magnet));
-            
-            // Update background color and font style
             string bg_obj = PANE_PREFIX + "matrix_bg_" + tf_str;
             ObjectSetInteger(0, bg_obj, OBJPROP_BGCOLOR, MatrixScoreToColor(data.score));
-            
             string font_style = (data.score == CONFIDENCE_STRONG) ? "Arial Bold" : "Arial";
             ObjectSetString(0, PANE_PREFIX + "matrix_tf_"+tf_str, OBJPROP_FONT, font_style);
             ObjectSetString(0, PANE_PREFIX + "matrix_bias_"+tf_str, OBJPROP_FONT, font_style);
             ObjectSetString(0, PANE_PREFIX + "matrix_zone_"+tf_str, OBJPROP_FONT, font_style);
             ObjectSetString(0, PANE_PREFIX + "matrix_magnet_"+tf_str, OBJPROP_FONT, font_style);
         }
+    }
+    
+    // --- Update Trade Recommendation
+    if(ShowTradeRecommendation)
+    {
+        TradeRecommendation rec = GetTradeRecommendation();
+        UpdateLabel("reco_action_value", RecoActionToString(rec.action), RecoActionToColor(rec.action));
+        UpdateLabel("reco_reason_value", rec.reasoning, COLOR_NEUTRAL_TEXT);
+        string reco_obj = PANE_PREFIX + "reco_action_value";
+        if(rec.action == SIGNAL_NONE) ObjectSetString(0, reco_obj, OBJPROP_FONT, "Arial Italic");
+        else ObjectSetString(0, reco_obj, OBJPROP_FONT, "Arial Bold");
+    }
+    
+    // --- NEW: Update Risk & Positioning ---
+    if(ShowRiskModule)
+    {
+        RiskModuleData risk_data = GetRiskModuleData();
+        UpdateLabel("risk_pct_value", StringFormat("%.1f%%", risk_data.risk_percent), COLOR_NEUTRAL_TEXT);
+        UpdateLabel("risk_pos_size_value", StringFormat("%.2f lots", risk_data.position_size), COLOR_NEUTRAL_TEXT);
+        UpdateLabel("risk_rr_value", risk_data.rr_ratio, COLOR_NEUTRAL_TEXT);
+        string rr_obj = PANE_PREFIX + "risk_rr_value";
+        ObjectSetString(0, rr_obj, OBJPROP_FONT, "Arial Bold");
     }
 
     // --- Update HUD Metrics
@@ -567,6 +645,7 @@ int OnInit()
     hATR_current = iATR(_Symbol, _Period, atr_period);
     g_pip_value = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
     if(SymbolInfoInteger(_Symbol, SYMBOL_DIGITS) == 3 || SymbolInfoInteger(_Symbol, SYMBOL_DIGITS) == 5) { g_pip_value *= 10; }
+    MathSrand((int)TimeCurrent()); // Seed random generator
     RedrawPanel();
     EventSetTimer(1);
     return(INIT_SUCCEEDED);
