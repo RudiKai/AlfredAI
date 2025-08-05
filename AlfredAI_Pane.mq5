@@ -1,6 +1,6 @@
 //+------------------------------------------------------------------+
 //|                        AlfredAI_Pane.mq5                         |
-//|         v3.1 - Added Session & Volatility Module                 |
+//|            v3.2 - Added Upcoming News Events Module              |
 //|                    Copyright 2024, RudiKai                       |
 //|                     https://github.com/RudiKai                   |
 //+------------------------------------------------------------------+
@@ -16,7 +16,8 @@ input bool ShowMultiTFMagnets = true;      // Toggle for the Multi-TF Magnet Sum
 input bool ShowConfidenceMatrix = true;    // Toggle for the Confidence Matrix
 input bool ShowTradeRecommendation = true; // Toggle for the Trade Recommendation
 input bool ShowRiskModule = true;          // Toggle for the Risk & Positioning module
-input bool ShowSessionModule = true;       // NEW: Toggle for the Session & Volatility module
+input bool ShowSessionModule = true;       // Toggle for the Session & Volatility module
+input bool ShowNewsModule = true;          // NEW: Toggle for the Upcoming News module
 
 // --- Includes
 #include <ChartObjects\ChartObjectsTxtControls.mqh>
@@ -29,8 +30,9 @@ enum ENUM_TRADE_SIGNAL { SIGNAL_NONE, SIGNAL_BUY, SIGNAL_SELL };
 enum ENUM_HEATMAP_STATUS { HEATMAP_NONE, HEATMAP_DEMAND, HEATMAP_SUPPLY };
 enum ENUM_MAGNET_RELATION { RELATION_ABOVE, RELATION_BELOW, RELATION_AT };
 enum ENUM_MATRIX_CONFIDENCE { CONFIDENCE_WEAK, CONFIDENCE_MEDIUM, CONFIDENCE_STRONG };
-// NEW: Enums for Session & Volatility
 enum ENUM_VOLATILITY { VOLATILITY_LOW, VOLATILITY_MEDIUM, VOLATILITY_HIGH };
+// NEW: Enum for News Impact
+enum ENUM_NEWS_IMPACT { IMPACT_LOW, IMPACT_MEDIUM, IMPACT_HIGH };
 
 // --- Structs for Data Handling
 struct LiveTradeData { bool trade_exists; double entry, sl, tp; };
@@ -38,8 +40,9 @@ struct CompassData { ENUM_BIAS bias; double confidence; };
 struct MatrixRowData { ENUM_BIAS bias; ENUM_ZONE zone; ENUM_MAGNET_RELATION magnet; ENUM_MATRIX_CONFIDENCE score; };
 struct TradeRecommendation { ENUM_TRADE_SIGNAL action; string reasoning; };
 struct RiskModuleData { double risk_percent; double position_size; string rr_ratio; };
-// NEW: Struct for Session Module data
 struct SessionData { string session_name; string session_overlap; ENUM_VOLATILITY volatility; };
+// NEW: Struct for News Event data
+struct NewsEventData { string time; string currency; string event_name; ENUM_NEWS_IMPACT impact; };
 
 
 // --- Constants for Panel Layout
@@ -51,6 +54,7 @@ struct SessionData { string session_name; string session_overlap; ENUM_VOLATILIT
 #define PANE_BG_OPACITY 210
 #define CONFIDENCE_BAR_MAX_WIDTH 100
 #define SEPARATOR_TEXT "───────────────"
+#define MAX_NEWS_ITEMS 3
 
 // --- Colors
 #define COLOR_BULL clrLimeGreen
@@ -80,6 +84,9 @@ struct SessionData { string session_name; string session_overlap; ENUM_VOLATILIT
 #define COLOR_VOL_HIGH_BG (color)ColorToARGB(clrMaroon, 80)
 #define COLOR_VOL_MED_BG (color)ColorToARGB(clrGoldenrod, 80)
 #define COLOR_VOL_LOW_BG (color)ColorToARGB(clrDarkGreen, 80)
+#define COLOR_IMPACT_HIGH clrRed
+#define COLOR_IMPACT_MEDIUM clrOrange
+#define COLOR_IMPACT_LOW clrLimeGreen
 
 // --- Font Sizes & Spacing
 #define FONT_SIZE_NORMAL 8
@@ -202,27 +209,20 @@ RiskModuleData GetRiskModuleData()
     return data;
 }
 
-// NEW: Mock function for Session & Volatility
 SessionData GetSessionData()
 {
     SessionData data;
     MqlDateTime dt;
-    TimeCurrent(dt); // Using client time for mock logic
+    TimeCurrent(dt);
     int hour = dt.hour;
-
-    // Determine Session (exclusive for main name)
     if(hour >= 13 && hour < 16) data.session_name = "London / NY";
     else if(hour >= 8 && hour < 13) data.session_name = "London";
     else if(hour >= 16 && hour < 21) data.session_name = "New York";
     else if(hour >= 21 || hour < 6) data.session_name = "Sydney";
     else if(hour >= 6 && hour < 8) data.session_name = "Tokyo";
     else data.session_name = "Inter-Session";
-
-    // Determine Overlap
     if(hour >= 13 && hour < 16) data.session_overlap = "NY + London";
     else data.session_overlap = "None";
-
-    // Determine Volatility (random mock)
     int rand_val = MathRand() % 3;
     switch(rand_val)
     {
@@ -231,6 +231,27 @@ SessionData GetSessionData()
         default: data.volatility = VOLATILITY_HIGH; break;
     }
     return data;
+}
+
+// NEW: Mock function for News Events
+int GetUpcomingNews(NewsEventData &news_array[])
+{
+    // Static list of mock news events
+    static NewsEventData all_news[] = 
+    {
+        {"14:30", "USD", "Non-Farm Payrolls", IMPACT_HIGH},
+        {"16:00", "EUR", "CPI YoY", IMPACT_MEDIUM},
+        {"22:00", "NZD", "Official Cash Rate", IMPACT_HIGH},
+        {"01:30", "AUD", "Retail Sales MoM", IMPACT_LOW}
+    };
+    
+    // For this mock, we just return the first 3. A real implementation would filter by time.
+    int count = MathMin(MAX_NEWS_ITEMS, ArraySize(all_news));
+    for(int i = 0; i < count; i++)
+    {
+        news_array[i] = all_news[i];
+    }
+    return count;
 }
 
 
@@ -292,10 +313,12 @@ color  MagnetRelationTFToColor(ENUM_MAGNET_RELATION r) { switch(r) { case RELATI
 color MatrixScoreToColor(ENUM_MATRIX_CONFIDENCE s) { switch(s) { case CONFIDENCE_STRONG: return COLOR_MATRIX_STRONG; case CONFIDENCE_MEDIUM: return COLOR_MATRIX_MEDIUM; } return COLOR_MATRIX_WEAK; }
 string RecoActionToString(ENUM_TRADE_SIGNAL s) { switch(s) { case SIGNAL_BUY: return "BUY"; case SIGNAL_SELL: return "SELL"; } return "WAIT"; }
 color RecoActionToColor(ENUM_TRADE_SIGNAL s) { switch(s) { case SIGNAL_BUY: return COLOR_BULL; case SIGNAL_SELL: return COLOR_BEAR; } return COLOR_NO_SIGNAL; }
-// NEW: Helpers for Session & Volatility
 string VolatilityToString(ENUM_VOLATILITY v) { switch(v) { case VOLATILITY_LOW: return "Low"; case VOLATILITY_MEDIUM: return "Medium"; } return "High"; }
 color VolatilityToColor(ENUM_VOLATILITY v) { switch(v) { case VOLATILITY_LOW: return COLOR_BULL; case VOLATILITY_MEDIUM: return COLOR_MAGNET_AT; } return COLOR_BEAR; }
 color VolatilityToHighlightColor(ENUM_VOLATILITY v) { switch(v) { case VOLATILITY_LOW: return COLOR_VOL_LOW_BG; case VOLATILITY_MEDIUM: return COLOR_VOL_MED_BG; } return COLOR_VOL_HIGH_BG; }
+// NEW: Helpers for News Module
+string NewsImpactToString(ENUM_NEWS_IMPACT i) { switch(i) { case IMPACT_LOW: return "LOW"; case IMPACT_MEDIUM: return "MEDIUM"; } return "HIGH"; }
+color NewsImpactToColor(ENUM_NEWS_IMPACT i) { switch(i) { case IMPACT_LOW: return COLOR_IMPACT_LOW; case IMPACT_MEDIUM: return COLOR_IMPACT_MEDIUM; } return COLOR_IMPACT_HIGH; }
 
 
 //+------------------------------------------------------------------+
@@ -331,6 +354,22 @@ void CreatePanel()
 
     CreateLabel("symbol_header", _Symbol, x_offset, y_offset, COLOR_HEADER, 10);
     y_offset += SPACING_LARGE;
+    
+    // --- NEW: Upcoming News Section ---
+    if(ShowNewsModule)
+    {
+        CreateLabel("news_header", "⚠️ UPCOMING NEWS", x_col1, y_offset, COLOR_HEADER, FONT_SIZE_HEADER); y_offset += SPACING_MEDIUM;
+        for(int i = 0; i < MAX_NEWS_ITEMS; i++)
+        {
+            string idx = IntegerToString(i);
+            CreateLabel("news_time_"+idx, "", x_col1, y_offset, COLOR_TEXT_DIM);
+            CreateLabel("news_curr_"+idx, "", x_col1 + 40, y_offset, COLOR_NEUTRAL_TEXT);
+            CreateLabel("news_event_"+idx, "", x_col1 + 75, y_offset, COLOR_NEUTRAL_TEXT);
+            CreateLabel("news_impact_"+idx, "", x_col1 + 180, y_offset, COLOR_NEUTRAL_TEXT, FONT_SIZE_NORMAL, ANCHOR_RIGHT);
+            y_offset += SPACING_MEDIUM;
+        }
+        DrawSeparator("sep_news", y_offset, x_offset);
+    }
 
     // --- TF Biases Section
     CreateLabel("biases_header", "TF Biases & Zones", x_col1, y_offset, COLOR_HEADER, FONT_SIZE_HEADER);
@@ -448,7 +487,7 @@ void CreatePanel()
         DrawSeparator("sep_risk", y_offset, x_offset);
     }
     
-    // --- NEW: Session & Volatility Section ---
+    // --- Session & Volatility Section
     if(ShowSessionModule)
     {
         CreateLabel("session_header", "SESSION & VOLATILITY", x_col1, y_offset, COLOR_HEADER, FONT_SIZE_HEADER); y_offset += SPACING_MEDIUM;
@@ -520,6 +559,33 @@ void CreatePanel()
 
 void UpdatePanel()
 {
+    // --- NEW: Update Upcoming News ---
+    if(ShowNewsModule)
+    {
+        NewsEventData news_items[];
+        ArrayResize(news_items, MAX_NEWS_ITEMS);
+        int news_count = GetUpcomingNews(news_items);
+        
+        for(int i = 0; i < MAX_NEWS_ITEMS; i++)
+        {
+            string idx = IntegerToString(i);
+            if(i < news_count)
+            {
+                UpdateLabel("news_time_"+idx, news_items[i].time, COLOR_TEXT_DIM);
+                UpdateLabel("news_curr_"+idx, news_items[i].currency, COLOR_NEUTRAL_TEXT);
+                string event_obj = PANE_PREFIX + "news_curr_" + idx;
+                ObjectSetString(0, event_obj, OBJPROP_FONT, "Arial Bold");
+                UpdateLabel("news_event_"+idx, news_items[i].event_name, COLOR_NEUTRAL_TEXT);
+                UpdateLabel("news_impact_"+idx, NewsImpactToString(news_items[i].impact), NewsImpactToColor(news_items[i].impact));
+            }
+            else // Clear unused labels
+            {
+                UpdateLabel("news_time_"+idx, ""); UpdateLabel("news_curr_"+idx, "");
+                UpdateLabel("news_event_"+idx, ""); UpdateLabel("news_impact_"+idx, "");
+            }
+        }
+    }
+    
     // --- Update TF Biases
     if(g_biases_expanded)
     {
@@ -626,7 +692,7 @@ void UpdatePanel()
         ObjectSetString(0, rr_obj, OBJPROP_FONT, "Arial Bold");
     }
     
-    // --- NEW: Update Session & Volatility ---
+    // --- Update Session & Volatility
     if(ShowSessionModule)
     {
         SessionData s_data = GetSessionData();
