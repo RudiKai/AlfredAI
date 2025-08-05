@@ -1,6 +1,6 @@
 //+------------------------------------------------------------------+
 //|                        AlfredAI_Pane.mq5                         |
-//|         v3.3 - Added Trader Emotion Simulation Module            |
+//|             v3.4 - Added Context-Aware Alert Center              |
 //|                    Copyright 2024, RudiKai                       |
 //|                     https://github.com/RudiKai                   |
 //+------------------------------------------------------------------+
@@ -18,7 +18,8 @@ input bool ShowTradeRecommendation = true; // Toggle for the Trade Recommendatio
 input bool ShowRiskModule = true;          // Toggle for the Risk & Positioning module
 input bool ShowSessionModule = true;       // Toggle for the Session & Volatility module
 input bool ShowNewsModule = true;          // Toggle for the Upcoming News module
-input bool ShowEmotionalState = true;      // NEW: Toggle for the Emotional State module
+input bool ShowEmotionalState = true;      // Toggle for the Emotional State module
+input bool ShowAlertCenter = true;         // NEW: Toggle for the Alert Center module
 
 // --- Includes
 #include <ChartObjects\ChartObjectsTxtControls.mqh>
@@ -33,8 +34,9 @@ enum ENUM_MAGNET_RELATION { RELATION_ABOVE, RELATION_BELOW, RELATION_AT };
 enum ENUM_MATRIX_CONFIDENCE { CONFIDENCE_WEAK, CONFIDENCE_MEDIUM, CONFIDENCE_STRONG };
 enum ENUM_VOLATILITY { VOLATILITY_LOW, VOLATILITY_MEDIUM, VOLATILITY_HIGH };
 enum ENUM_NEWS_IMPACT { IMPACT_LOW, IMPACT_MEDIUM, IMPACT_HIGH };
-// NEW: Enum for Emotional State
 enum ENUM_EMOTIONAL_STATE { STATE_CAUTIOUS, STATE_CONFIDENT, STATE_OVEREXTENDED, STATE_ANXIOUS, STATE_NEUTRAL };
+// NEW: Enum for Alert Center status
+enum ENUM_ALERT_STATUS { ALERT_NONE, ALERT_PARTIAL, ALERT_STRONG };
 
 
 // --- Structs for Data Handling
@@ -45,8 +47,9 @@ struct TradeRecommendation { ENUM_TRADE_SIGNAL action; string reasoning; };
 struct RiskModuleData { double risk_percent; double position_size; string rr_ratio; };
 struct SessionData { string session_name; string session_overlap; ENUM_VOLATILITY volatility; };
 struct NewsEventData { string time; string currency; string event_name; ENUM_NEWS_IMPACT impact; };
-// NEW: Struct for Emotional State data
 struct EmotionalStateData { ENUM_EMOTIONAL_STATE state; string text; };
+// NEW: Struct for Alert Center data
+struct AlertData { ENUM_ALERT_STATUS status; string text; };
 
 
 // --- Constants for Panel Layout
@@ -96,6 +99,9 @@ struct EmotionalStateData { ENUM_EMOTIONAL_STATE state; string text; };
 #define COLOR_STATE_OVEREXTENDED clrRed
 #define COLOR_STATE_ANXIOUS clrDodgerBlue
 #define COLOR_STATE_NEUTRAL clrGray
+#define COLOR_ALERT_STRONG clrLimeGreen
+#define COLOR_ALERT_PARTIAL clrYellow
+#define COLOR_ALERT_NONE clrGray
 
 // --- Font Sizes & Spacing
 #define FONT_SIZE_NORMAL 8
@@ -256,11 +262,10 @@ int GetUpcomingNews(NewsEventData &news_array[])
     return count;
 }
 
-// NEW: Mock function for Emotional State
 EmotionalStateData GetEmotionalState()
 {
     EmotionalStateData data;
-    long time_cycle = TimeCurrent() / 180; // Changes every 3 minutes
+    long time_cycle = TimeCurrent() / 180;
     switch(time_cycle % 5)
     {
         case 0: data.state = STATE_CONFIDENT; data.text = "Confident – Trend Aligned"; break;
@@ -270,6 +275,38 @@ EmotionalStateData GetEmotionalState()
         default: data.state = STATE_NEUTRAL; data.text = "Neutral – Balanced Mindset"; break;
     }
     return data;
+}
+
+// NEW: Mock function for Alert Center
+AlertData GetAlertCenterStatus()
+{
+    AlertData alert;
+    int strong_count = 0;
+    int medium_count = 0;
+
+    for(int i = 0; i < ArraySize(g_matrix_tfs); i++)
+    {
+        MatrixRowData row = GetConfidenceMatrixRow(g_matrix_tfs[i]);
+        if(row.score == CONFIDENCE_STRONG) strong_count++;
+        else if(row.score == CONFIDENCE_MEDIUM) medium_count++;
+    }
+
+    if(strong_count > 0)
+    {
+        alert.status = ALERT_STRONG;
+        alert.text = "✅ STRONG ALIGNMENT — High-Conviction Setup";
+    }
+    else if(medium_count > 0)
+    {
+        alert.status = ALERT_PARTIAL;
+        alert.text = "⚠️ Partial Alignment — Watch for Entry Trigger";
+    }
+    else
+    {
+        alert.status = ALERT_NONE;
+        alert.text = "⏳ No Signal — Standby";
+    }
+    return alert;
 }
 
 
@@ -336,8 +373,9 @@ color VolatilityToColor(ENUM_VOLATILITY v) { switch(v) { case VOLATILITY_LOW: re
 color VolatilityToHighlightColor(ENUM_VOLATILITY v) { switch(v) { case VOLATILITY_LOW: return COLOR_VOL_LOW_BG; case VOLATILITY_MEDIUM: return COLOR_VOL_MED_BG; } return COLOR_VOL_HIGH_BG; }
 string NewsImpactToString(ENUM_NEWS_IMPACT i) { switch(i) { case IMPACT_LOW: return "LOW"; case IMPACT_MEDIUM: return "MEDIUM"; } return "HIGH"; }
 color NewsImpactToColor(ENUM_NEWS_IMPACT i) { switch(i) { case IMPACT_LOW: return COLOR_IMPACT_LOW; case IMPACT_MEDIUM: return COLOR_IMPACT_MEDIUM; } return COLOR_IMPACT_HIGH; }
-// NEW: Helpers for Emotional State
 color EmotionalStateToColor(ENUM_EMOTIONAL_STATE s) { switch(s) { case STATE_CAUTIOUS: return COLOR_STATE_CAUTIOUS; case STATE_CONFIDENT: return COLOR_STATE_CONFIDENT; case STATE_OVEREXTENDED: return COLOR_STATE_OVEREXTENDED; case STATE_ANXIOUS: return COLOR_STATE_ANXIOUS; } return COLOR_STATE_NEUTRAL; }
+// NEW: Helper for Alert Center
+color AlertStatusToColor(ENUM_ALERT_STATUS s) { switch(s) { case ALERT_STRONG: return COLOR_ALERT_STRONG; case ALERT_PARTIAL: return COLOR_ALERT_PARTIAL; } return COLOR_ALERT_NONE; }
 
 
 //+------------------------------------------------------------------+
@@ -390,7 +428,7 @@ void CreatePanel()
         DrawSeparator("sep_news", y_offset, x_offset);
     }
     
-    // --- NEW: Emotional State Section ---
+    // --- Emotional State Section
     if(ShowEmotionalState)
     {
         CreateLabel("emotion_header", "🧠 EMOTIONAL STATE", x_col1, y_offset, COLOR_HEADER, FONT_SIZE_HEADER); y_offset += SPACING_MEDIUM;
@@ -398,6 +436,15 @@ void CreatePanel()
         CreateLabel("emotion_text", "---", x_col1 + 15, y_offset, COLOR_NEUTRAL_TEXT);
         y_offset += SPACING_MEDIUM;
         DrawSeparator("sep_emotion", y_offset, x_offset);
+    }
+    
+    // --- NEW: Alert Center Section ---
+    if(ShowAlertCenter)
+    {
+        CreateLabel("alert_header", "🚨 ALERT CENTER", x_col1, y_offset, COLOR_HEADER, FONT_SIZE_HEADER); y_offset += SPACING_MEDIUM;
+        CreateLabel("alert_status", "---", x_col1, y_offset, COLOR_NA, FONT_SIZE_NORMAL);
+        y_offset += SPACING_MEDIUM;
+        DrawSeparator("sep_alert", y_offset, x_offset);
     }
 
     // --- TF Biases Section
@@ -615,12 +662,19 @@ void UpdatePanel()
         }
     }
     
-    // --- NEW: Update Emotional State ---
+    // --- Update Emotional State
     if(ShowEmotionalState)
     {
         EmotionalStateData emotion_data = GetEmotionalState();
         UpdateLabel("emotion_indicator", "●", EmotionalStateToColor(emotion_data.state));
         UpdateLabel("emotion_text", emotion_data.text, COLOR_NEUTRAL_TEXT);
+    }
+    
+    // --- NEW: Update Alert Center ---
+    if(ShowAlertCenter)
+    {
+        AlertData alert_data = GetAlertCenterStatus();
+        UpdateLabel("alert_status", alert_data.text, AlertStatusToColor(alert_data.status));
     }
     
     // --- Update TF Biases
