@@ -1,7 +1,7 @@
 //+------------------------------------------------------------------+
 //|                       AlfredSupDemCore™                         |
 //|      Structural Supply/Demand zone generator for Alfred Suite    |
-//|                (FIXED: Self-Contained Version)                   |
+//|         (FIXED: Visuals updated as per specification)            |
 //+------------------------------------------------------------------+
 #property indicator_chart_window
 #property strict
@@ -142,20 +142,20 @@ void OnChartEvent(const int id,const long &l,const double &d,const string &s)
 }
 
 //+------------------------------------------------------------------+
-//| Draw all zones for each timeframe                                |
+//| Draw all zones for each timeframe (VISUALS CORRECTED)            |
 //+------------------------------------------------------------------+
 void DrawAllZones()
 {
-   // LTF zones
-   DrawZones(_Period,      "LTF", Alfred.supdemDemandColorLTF, Alfred.supdemSupplyColorLTF, true);
-   DrawZones(PERIOD_M15,   "M15", Alfred.supdemDemandColorLTF, Alfred.supdemSupplyColorLTF, true);
-   DrawZones(PERIOD_M30,   "M30", Alfred.supdemDemandColorLTF, Alfred.supdemSupplyColorLTF, true);
+   // LTF zones (filled, borderOnly=false)
+   DrawZones(_Period,      "LTF", Alfred.supdemDemandColorLTF, Alfred.supdemSupplyColorLTF, false);
+   DrawZones(PERIOD_M15,   "M15", Alfred.supdemDemandColorLTF, Alfred.supdemSupplyColorLTF, false);
+   DrawZones(PERIOD_M30,   "M30", Alfred.supdemDemandColorLTF, Alfred.supdemSupplyColorLTF, false);
 
-   // HTF zones
-   DrawZones(PERIOD_H1,    "H1",  Alfred.supdemDemandColorHTF, Alfred.supdemSupplyColorHTF, false);
-   DrawZones(PERIOD_H2,    "H2",  Alfred.supdemDemandColorHTF, Alfred.supdemSupplyColorHTF, false);
-   DrawZones(PERIOD_H4,    "H4",  Alfred.supdemDemandColorHTF, Alfred.supdemSupplyColorHTF, false);
-   DrawZones(PERIOD_D1,    "D1",  Alfred.supdemDemandColorHTF, Alfred.supdemSupplyColorHTF, false);
+   // HTF zones (border only, borderOnly=true)
+   DrawZones(PERIOD_H1,    "H1",  Alfred.supdemDemandColorHTF, Alfred.supdemSupplyColorHTF, true);
+   DrawZones(PERIOD_H2,    "H2",  Alfred.supdemDemandColorHTF, Alfred.supdemSupplyColorHTF, true);
+   DrawZones(PERIOD_H4,    "H4",  Alfred.supdemDemandColorHTF, Alfred.supdemSupplyColorHTF, true);
+   DrawZones(PERIOD_D1,    "D1",  Alfred.supdemDemandColorHTF, Alfred.supdemSupplyColorHTF, true);
 }
 
 //+------------------------------------------------------------------+
@@ -165,7 +165,7 @@ void DrawZones(ENUM_TIMEFRAMES tf,
                string          suffix,
                color           clrD,
                color           clrS,
-               bool            isLTF)
+               bool            isBorderOnly) // Renamed for clarity
 {
    datetime nowT  = iTime(_Symbol, tf, 0);
    int      tfSec = GetTFSeconds(tf);
@@ -183,7 +183,7 @@ void DrawZones(ENUM_TIMEFRAMES tf,
       bool ok = (dist >= Alfred.supdemMinImpulseMovePips)
                 && (!Alfred.supdemEnableBreakoutRemoval || !IsZoneBroken(tf,t0,highP,lowP,true))
                 && (!Alfred.supdemEnableTimeDecay     || !IsZoneExpired(tf,t0));
-      if(ok) DrawRect("DZone_" + suffix, t0, highP, extT, lowP, clrD, isLTF);
+      if(ok) DrawRect("DZone_" + suffix, t0, highP, extT, lowP, clrD, isBorderOnly);
       else   ObjectDelete(0, "DZone_" + suffix);
    }
 
@@ -199,13 +199,13 @@ void DrawZones(ENUM_TIMEFRAMES tf,
       bool ok = (dist >= Alfred.supdemMinImpulseMovePips)
                 && (!Alfred.supdemEnableBreakoutRemoval || !IsZoneBroken(tf,t0,highP,lowP,false))
                 && (!Alfred.supdemEnableTimeDecay     || !IsZoneExpired(tf,t0));
-      if(ok) DrawRect("SZone_" + suffix, t0, lowP, extT, highP, clrS, isLTF);
+      if(ok) DrawRect("SZone_" + suffix, t0, lowP, extT, highP, clrS, isBorderOnly);
       else   ObjectDelete(0, "SZone_" + suffix);
    }
 }
 
 //+------------------------------------------------------------------+
-//| Rectangle drawer                                                 |
+//| Rectangle drawer (VISUALS CORRECTED)                             |
 //+------------------------------------------------------------------+
 void DrawRect(string name,
               datetime t1,
@@ -223,9 +223,9 @@ void DrawRect(string name,
       ObjectMove(0,name,1,t2,p2);
    }
    ObjectSetInteger(0,name,OBJPROP_COLOR,   clr);
-   ObjectSetInteger(0,name,OBJPROP_BGCOLOR, ColorToARGB(clr,255));
+   ObjectSetInteger(0,name,OBJPROP_BGCOLOR, ColorToARGB(clr, 30)); // CORRECTED: Use transparent fill (alpha=30)
    ObjectSetInteger(0,name,OBJPROP_FILL,    !borderOnly);
-   ObjectSetInteger(0,name,OBJPROP_WIDTH,   borderOnly?3:1);
+   ObjectSetInteger(0,name,OBJPROP_WIDTH,   borderOnly ? 3 : 1); // CORRECTED: Thick border for HTF
    ObjectSetInteger(0,name,OBJPROP_BACK,    true);
 }
 
