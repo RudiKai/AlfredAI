@@ -1,6 +1,6 @@
 //+------------------------------------------------------------------+
 //|                        AlfredAI_Pane.mq5                         |
-//|            v3.2 - Added Upcoming News Events Module              |
+//|         v3.3 - Added Trader Emotion Simulation Module            |
 //|                    Copyright 2024, RudiKai                       |
 //|                     https://github.com/RudiKai                   |
 //+------------------------------------------------------------------+
@@ -17,7 +17,8 @@ input bool ShowConfidenceMatrix = true;    // Toggle for the Confidence Matrix
 input bool ShowTradeRecommendation = true; // Toggle for the Trade Recommendation
 input bool ShowRiskModule = true;          // Toggle for the Risk & Positioning module
 input bool ShowSessionModule = true;       // Toggle for the Session & Volatility module
-input bool ShowNewsModule = true;          // NEW: Toggle for the Upcoming News module
+input bool ShowNewsModule = true;          // Toggle for the Upcoming News module
+input bool ShowEmotionalState = true;      // NEW: Toggle for the Emotional State module
 
 // --- Includes
 #include <ChartObjects\ChartObjectsTxtControls.mqh>
@@ -31,8 +32,10 @@ enum ENUM_HEATMAP_STATUS { HEATMAP_NONE, HEATMAP_DEMAND, HEATMAP_SUPPLY };
 enum ENUM_MAGNET_RELATION { RELATION_ABOVE, RELATION_BELOW, RELATION_AT };
 enum ENUM_MATRIX_CONFIDENCE { CONFIDENCE_WEAK, CONFIDENCE_MEDIUM, CONFIDENCE_STRONG };
 enum ENUM_VOLATILITY { VOLATILITY_LOW, VOLATILITY_MEDIUM, VOLATILITY_HIGH };
-// NEW: Enum for News Impact
 enum ENUM_NEWS_IMPACT { IMPACT_LOW, IMPACT_MEDIUM, IMPACT_HIGH };
+// NEW: Enum for Emotional State
+enum ENUM_EMOTIONAL_STATE { STATE_CAUTIOUS, STATE_CONFIDENT, STATE_OVEREXTENDED, STATE_ANXIOUS, STATE_NEUTRAL };
+
 
 // --- Structs for Data Handling
 struct LiveTradeData { bool trade_exists; double entry, sl, tp; };
@@ -41,8 +44,9 @@ struct MatrixRowData { ENUM_BIAS bias; ENUM_ZONE zone; ENUM_MAGNET_RELATION magn
 struct TradeRecommendation { ENUM_TRADE_SIGNAL action; string reasoning; };
 struct RiskModuleData { double risk_percent; double position_size; string rr_ratio; };
 struct SessionData { string session_name; string session_overlap; ENUM_VOLATILITY volatility; };
-// NEW: Struct for News Event data
 struct NewsEventData { string time; string currency; string event_name; ENUM_NEWS_IMPACT impact; };
+// NEW: Struct for Emotional State data
+struct EmotionalStateData { ENUM_EMOTIONAL_STATE state; string text; };
 
 
 // --- Constants for Panel Layout
@@ -87,6 +91,11 @@ struct NewsEventData { string time; string currency; string event_name; ENUM_NEW
 #define COLOR_IMPACT_HIGH clrRed
 #define COLOR_IMPACT_MEDIUM clrOrange
 #define COLOR_IMPACT_LOW clrLimeGreen
+#define COLOR_STATE_CAUTIOUS clrYellow
+#define COLOR_STATE_CONFIDENT clrLimeGreen
+#define COLOR_STATE_OVEREXTENDED clrRed
+#define COLOR_STATE_ANXIOUS clrDodgerBlue
+#define COLOR_STATE_NEUTRAL clrGray
 
 // --- Font Sizes & Spacing
 #define FONT_SIZE_NORMAL 8
@@ -233,10 +242,8 @@ SessionData GetSessionData()
     return data;
 }
 
-// NEW: Mock function for News Events
 int GetUpcomingNews(NewsEventData &news_array[])
 {
-    // Static list of mock news events
     static NewsEventData all_news[] = 
     {
         {"14:30", "USD", "Non-Farm Payrolls", IMPACT_HIGH},
@@ -244,14 +251,25 @@ int GetUpcomingNews(NewsEventData &news_array[])
         {"22:00", "NZD", "Official Cash Rate", IMPACT_HIGH},
         {"01:30", "AUD", "Retail Sales MoM", IMPACT_LOW}
     };
-    
-    // For this mock, we just return the first 3. A real implementation would filter by time.
     int count = MathMin(MAX_NEWS_ITEMS, ArraySize(all_news));
-    for(int i = 0; i < count; i++)
-    {
-        news_array[i] = all_news[i];
-    }
+    for(int i = 0; i < count; i++) { news_array[i] = all_news[i]; }
     return count;
+}
+
+// NEW: Mock function for Emotional State
+EmotionalStateData GetEmotionalState()
+{
+    EmotionalStateData data;
+    long time_cycle = TimeCurrent() / 180; // Changes every 3 minutes
+    switch(time_cycle % 5)
+    {
+        case 0: data.state = STATE_CONFIDENT; data.text = "Confident – Trend Aligned"; break;
+        case 1: data.state = STATE_CAUTIOUS; data.text = "Cautious – Awaiting Confirmation"; break;
+        case 2: data.state = STATE_OVEREXTENDED; data.text = "Overextended – Risk of Reversal"; break;
+        case 3: data.state = STATE_ANXIOUS; data.text = "Anxious – Overtrading Zone"; break;
+        default: data.state = STATE_NEUTRAL; data.text = "Neutral – Balanced Mindset"; break;
+    }
+    return data;
 }
 
 
@@ -316,9 +334,10 @@ color RecoActionToColor(ENUM_TRADE_SIGNAL s) { switch(s) { case SIGNAL_BUY: retu
 string VolatilityToString(ENUM_VOLATILITY v) { switch(v) { case VOLATILITY_LOW: return "Low"; case VOLATILITY_MEDIUM: return "Medium"; } return "High"; }
 color VolatilityToColor(ENUM_VOLATILITY v) { switch(v) { case VOLATILITY_LOW: return COLOR_BULL; case VOLATILITY_MEDIUM: return COLOR_MAGNET_AT; } return COLOR_BEAR; }
 color VolatilityToHighlightColor(ENUM_VOLATILITY v) { switch(v) { case VOLATILITY_LOW: return COLOR_VOL_LOW_BG; case VOLATILITY_MEDIUM: return COLOR_VOL_MED_BG; } return COLOR_VOL_HIGH_BG; }
-// NEW: Helpers for News Module
 string NewsImpactToString(ENUM_NEWS_IMPACT i) { switch(i) { case IMPACT_LOW: return "LOW"; case IMPACT_MEDIUM: return "MEDIUM"; } return "HIGH"; }
 color NewsImpactToColor(ENUM_NEWS_IMPACT i) { switch(i) { case IMPACT_LOW: return COLOR_IMPACT_LOW; case IMPACT_MEDIUM: return COLOR_IMPACT_MEDIUM; } return COLOR_IMPACT_HIGH; }
+// NEW: Helpers for Emotional State
+color EmotionalStateToColor(ENUM_EMOTIONAL_STATE s) { switch(s) { case STATE_CAUTIOUS: return COLOR_STATE_CAUTIOUS; case STATE_CONFIDENT: return COLOR_STATE_CONFIDENT; case STATE_OVEREXTENDED: return COLOR_STATE_OVEREXTENDED; case STATE_ANXIOUS: return COLOR_STATE_ANXIOUS; } return COLOR_STATE_NEUTRAL; }
 
 
 //+------------------------------------------------------------------+
@@ -355,7 +374,7 @@ void CreatePanel()
     CreateLabel("symbol_header", _Symbol, x_offset, y_offset, COLOR_HEADER, 10);
     y_offset += SPACING_LARGE;
     
-    // --- NEW: Upcoming News Section ---
+    // --- Upcoming News Section
     if(ShowNewsModule)
     {
         CreateLabel("news_header", "⚠️ UPCOMING NEWS", x_col1, y_offset, COLOR_HEADER, FONT_SIZE_HEADER); y_offset += SPACING_MEDIUM;
@@ -369,6 +388,16 @@ void CreatePanel()
             y_offset += SPACING_MEDIUM;
         }
         DrawSeparator("sep_news", y_offset, x_offset);
+    }
+    
+    // --- NEW: Emotional State Section ---
+    if(ShowEmotionalState)
+    {
+        CreateLabel("emotion_header", "🧠 EMOTIONAL STATE", x_col1, y_offset, COLOR_HEADER, FONT_SIZE_HEADER); y_offset += SPACING_MEDIUM;
+        CreateLabel("emotion_indicator", "●", x_col1, y_offset, COLOR_STATE_NEUTRAL, FONT_SIZE_HEADER);
+        CreateLabel("emotion_text", "---", x_col1 + 15, y_offset, COLOR_NEUTRAL_TEXT);
+        y_offset += SPACING_MEDIUM;
+        DrawSeparator("sep_emotion", y_offset, x_offset);
     }
 
     // --- TF Biases Section
@@ -559,7 +588,7 @@ void CreatePanel()
 
 void UpdatePanel()
 {
-    // --- NEW: Update Upcoming News ---
+    // --- Update Upcoming News
     if(ShowNewsModule)
     {
         NewsEventData news_items[];
@@ -578,12 +607,20 @@ void UpdatePanel()
                 UpdateLabel("news_event_"+idx, news_items[i].event_name, COLOR_NEUTRAL_TEXT);
                 UpdateLabel("news_impact_"+idx, NewsImpactToString(news_items[i].impact), NewsImpactToColor(news_items[i].impact));
             }
-            else // Clear unused labels
+            else
             {
                 UpdateLabel("news_time_"+idx, ""); UpdateLabel("news_curr_"+idx, "");
                 UpdateLabel("news_event_"+idx, ""); UpdateLabel("news_impact_"+idx, "");
             }
         }
+    }
+    
+    // --- NEW: Update Emotional State ---
+    if(ShowEmotionalState)
+    {
+        EmotionalStateData emotion_data = GetEmotionalState();
+        UpdateLabel("emotion_indicator", "●", EmotionalStateToColor(emotion_data.state));
+        UpdateLabel("emotion_text", emotion_data.text, COLOR_NEUTRAL_TEXT);
     }
     
     // --- Update TF Biases
