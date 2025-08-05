@@ -1,6 +1,6 @@
 //+------------------------------------------------------------------+
 //|                        AlfredAI_Pane.mq5                         |
-//|           v3.0 - Added Risk & Position Sizing Module             |
+//|         v3.1 - Added Session & Volatility Module                 |
 //|                    Copyright 2024, RudiKai                       |
 //|                     https://github.com/RudiKai                   |
 //+------------------------------------------------------------------+
@@ -15,7 +15,8 @@ input bool ShowMagnetProjection = true;    // Toggle for the Magnet Projection s
 input bool ShowMultiTFMagnets = true;      // Toggle for the Multi-TF Magnet Summary
 input bool ShowConfidenceMatrix = true;    // Toggle for the Confidence Matrix
 input bool ShowTradeRecommendation = true; // Toggle for the Trade Recommendation
-input bool ShowRiskModule = true;          // NEW: Toggle for the Risk & Positioning module
+input bool ShowRiskModule = true;          // Toggle for the Risk & Positioning module
+input bool ShowSessionModule = true;       // NEW: Toggle for the Session & Volatility module
 
 // --- Includes
 #include <ChartObjects\ChartObjectsTxtControls.mqh>
@@ -28,14 +29,17 @@ enum ENUM_TRADE_SIGNAL { SIGNAL_NONE, SIGNAL_BUY, SIGNAL_SELL };
 enum ENUM_HEATMAP_STATUS { HEATMAP_NONE, HEATMAP_DEMAND, HEATMAP_SUPPLY };
 enum ENUM_MAGNET_RELATION { RELATION_ABOVE, RELATION_BELOW, RELATION_AT };
 enum ENUM_MATRIX_CONFIDENCE { CONFIDENCE_WEAK, CONFIDENCE_MEDIUM, CONFIDENCE_STRONG };
+// NEW: Enums for Session & Volatility
+enum ENUM_VOLATILITY { VOLATILITY_LOW, VOLATILITY_MEDIUM, VOLATILITY_HIGH };
 
 // --- Structs for Data Handling
 struct LiveTradeData { bool trade_exists; double entry, sl, tp; };
 struct CompassData { ENUM_BIAS bias; double confidence; };
 struct MatrixRowData { ENUM_BIAS bias; ENUM_ZONE zone; ENUM_MAGNET_RELATION magnet; ENUM_MATRIX_CONFIDENCE score; };
 struct TradeRecommendation { ENUM_TRADE_SIGNAL action; string reasoning; };
-// NEW: Struct for Risk Module data
 struct RiskModuleData { double risk_percent; double position_size; string rr_ratio; };
+// NEW: Struct for Session Module data
+struct SessionData { string session_name; string session_overlap; ENUM_VOLATILITY volatility; };
 
 
 // --- Constants for Panel Layout
@@ -72,6 +76,10 @@ struct RiskModuleData { double risk_percent; double position_size; string rr_rat
 #define COLOR_MATRIX_STRONG (color)ColorToARGB(clrDarkGreen, 120)
 #define COLOR_MATRIX_MEDIUM (color)ColorToARGB(clrGoldenrod, 100)
 #define COLOR_MATRIX_WEAK (color)ColorToARGB(clrMaroon, 120)
+#define COLOR_SESSION clrCyan
+#define COLOR_VOL_HIGH_BG (color)ColorToARGB(clrMaroon, 80)
+#define COLOR_VOL_MED_BG (color)ColorToARGB(clrGoldenrod, 80)
+#define COLOR_VOL_LOW_BG (color)ColorToARGB(clrDarkGreen, 80)
 
 // --- Font Sizes & Spacing
 #define FONT_SIZE_NORMAL 8
@@ -179,7 +187,6 @@ TradeRecommendation GetTradeRecommendation()
     return rec;
 }
 
-// NEW: Mock function for Risk Module
 RiskModuleData GetRiskModuleData()
 {
     RiskModuleData data;
@@ -191,6 +198,37 @@ RiskModuleData GetRiskModuleData()
         case 0: data.rr_ratio = "1 : 1.5"; break;
         case 1: data.rr_ratio = "1 : 2.0"; break;
         default: data.rr_ratio = "1 : 3.0"; break;
+    }
+    return data;
+}
+
+// NEW: Mock function for Session & Volatility
+SessionData GetSessionData()
+{
+    SessionData data;
+    MqlDateTime dt;
+    TimeCurrent(dt); // Using client time for mock logic
+    int hour = dt.hour;
+
+    // Determine Session (exclusive for main name)
+    if(hour >= 13 && hour < 16) data.session_name = "London / NY";
+    else if(hour >= 8 && hour < 13) data.session_name = "London";
+    else if(hour >= 16 && hour < 21) data.session_name = "New York";
+    else if(hour >= 21 || hour < 6) data.session_name = "Sydney";
+    else if(hour >= 6 && hour < 8) data.session_name = "Tokyo";
+    else data.session_name = "Inter-Session";
+
+    // Determine Overlap
+    if(hour >= 13 && hour < 16) data.session_overlap = "NY + London";
+    else data.session_overlap = "None";
+
+    // Determine Volatility (random mock)
+    int rand_val = MathRand() % 3;
+    switch(rand_val)
+    {
+        case 0: data.volatility = VOLATILITY_LOW; break;
+        case 1: data.volatility = VOLATILITY_MEDIUM; break;
+        default: data.volatility = VOLATILITY_HIGH; break;
     }
     return data;
 }
@@ -254,6 +292,10 @@ color  MagnetRelationTFToColor(ENUM_MAGNET_RELATION r) { switch(r) { case RELATI
 color MatrixScoreToColor(ENUM_MATRIX_CONFIDENCE s) { switch(s) { case CONFIDENCE_STRONG: return COLOR_MATRIX_STRONG; case CONFIDENCE_MEDIUM: return COLOR_MATRIX_MEDIUM; } return COLOR_MATRIX_WEAK; }
 string RecoActionToString(ENUM_TRADE_SIGNAL s) { switch(s) { case SIGNAL_BUY: return "BUY"; case SIGNAL_SELL: return "SELL"; } return "WAIT"; }
 color RecoActionToColor(ENUM_TRADE_SIGNAL s) { switch(s) { case SIGNAL_BUY: return COLOR_BULL; case SIGNAL_SELL: return COLOR_BEAR; } return COLOR_NO_SIGNAL; }
+// NEW: Helpers for Session & Volatility
+string VolatilityToString(ENUM_VOLATILITY v) { switch(v) { case VOLATILITY_LOW: return "Low"; case VOLATILITY_MEDIUM: return "Medium"; } return "High"; }
+color VolatilityToColor(ENUM_VOLATILITY v) { switch(v) { case VOLATILITY_LOW: return COLOR_BULL; case VOLATILITY_MEDIUM: return COLOR_MAGNET_AT; } return COLOR_BEAR; }
+color VolatilityToHighlightColor(ENUM_VOLATILITY v) { switch(v) { case VOLATILITY_LOW: return COLOR_VOL_LOW_BG; case VOLATILITY_MEDIUM: return COLOR_VOL_MED_BG; } return COLOR_VOL_HIGH_BG; }
 
 
 //+------------------------------------------------------------------+
@@ -390,7 +432,7 @@ void CreatePanel()
         DrawSeparator("sep_reco", y_offset, x_offset);
     }
     
-    // --- NEW: Risk & Positioning Section ---
+    // --- Risk & Positioning Section
     if(ShowRiskModule)
     {
         CreateLabel("risk_header", "RISK & POSITIONING", x_col1, y_offset, COLOR_HEADER, FONT_SIZE_HEADER); y_offset += SPACING_MEDIUM;
@@ -404,6 +446,23 @@ void CreatePanel()
         CreateLabel("risk_rr_value", "---", x_col2, y_offset, COLOR_NEUTRAL_TEXT, FONT_SIZE_NORMAL);
         y_offset += SPACING_MEDIUM;
         DrawSeparator("sep_risk", y_offset, x_offset);
+    }
+    
+    // --- NEW: Session & Volatility Section ---
+    if(ShowSessionModule)
+    {
+        CreateLabel("session_header", "SESSION & VOLATILITY", x_col1, y_offset, COLOR_HEADER, FONT_SIZE_HEADER); y_offset += SPACING_MEDIUM;
+        CreateLabel("session_name_prefix", "Active Session:", x_col1, y_offset, COLOR_HEADER);
+        CreateLabel("session_name_value", "---", x_col2, y_offset, COLOR_NEUTRAL_TEXT);
+        y_offset += SPACING_MEDIUM;
+        CreateLabel("session_overlap_prefix", "Session Overlap:", x_col1, y_offset, COLOR_HEADER);
+        CreateLabel("session_overlap_value", "---", x_col2, y_offset, COLOR_NEUTRAL_TEXT);
+        y_offset += SPACING_MEDIUM;
+        CreateLabel("session_vol_prefix", "Volatility:", x_col1, y_offset, COLOR_HEADER);
+        CreateRectangle("session_vol_bg", x_col2, y_offset - 2, 60, 14, clrNONE);
+        CreateLabel("session_vol_value", "---", x_col2 + 4, y_offset, COLOR_NEUTRAL_TEXT);
+        y_offset += SPACING_MEDIUM;
+        DrawSeparator("sep_session", y_offset, x_offset);
     }
 
     // --- HUD Metrics Section
@@ -556,7 +615,7 @@ void UpdatePanel()
         else ObjectSetString(0, reco_obj, OBJPROP_FONT, "Arial Bold");
     }
     
-    // --- NEW: Update Risk & Positioning ---
+    // --- Update Risk & Positioning
     if(ShowRiskModule)
     {
         RiskModuleData risk_data = GetRiskModuleData();
@@ -566,6 +625,22 @@ void UpdatePanel()
         string rr_obj = PANE_PREFIX + "risk_rr_value";
         ObjectSetString(0, rr_obj, OBJPROP_FONT, "Arial Bold");
     }
+    
+    // --- NEW: Update Session & Volatility ---
+    if(ShowSessionModule)
+    {
+        SessionData s_data = GetSessionData();
+        UpdateLabel("session_name_value", s_data.session_name, COLOR_SESSION);
+        UpdateLabel("session_overlap_value", s_data.session_overlap, COLOR_NEUTRAL_TEXT);
+        
+        UpdateLabel("session_vol_value", VolatilityToString(s_data.volatility), VolatilityToColor(s_data.volatility));
+        string vol_obj = PANE_PREFIX + "session_vol_value";
+        ObjectSetString(0, vol_obj, OBJPROP_FONT, "Arial Bold");
+        
+        string vol_bg_obj = PANE_PREFIX + "session_vol_bg";
+        ObjectSetInteger(0, vol_bg_obj, OBJPROP_BGCOLOR, VolatilityToHighlightColor(s_data.volatility));
+    }
+
 
     // --- Update HUD Metrics
     if(g_hud_expanded)
