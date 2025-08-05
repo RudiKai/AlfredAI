@@ -1,6 +1,6 @@
 //+------------------------------------------------------------------+
 //|                        AlfredAI_Pane.mq5                         |
-//|        v2.3 - Trade Signal Logic & Visual Polish                 |
+//|         v2.6 - Added Dynamic Magnet Projection Status            |
 //|                    Copyright 2024, RudiKai                       |
 //|                     https://github.com/RudiKai                   |
 //+------------------------------------------------------------------+
@@ -8,8 +8,10 @@
 #property indicator_chart_window
 #property indicator_plots 0 // Suppress "no indicator plot" warning
 
-// --- Optional Input ---
-input bool ShowDebugInfo = false; // Toggle for displaying debug information
+// --- Optional Inputs ---
+input bool ShowDebugInfo = false;          // Toggle for displaying debug information
+input bool ShowZoneHeatmap = true;         // Toggle for the Zone Heatmap
+input bool ShowMagnetProjection = true;    // NEW: Toggle for the Magnet Projection status
 
 // --- Includes
 #include <ChartObjects\ChartObjectsTxtControls.mqh>
@@ -18,7 +20,9 @@ input bool ShowDebugInfo = false; // Toggle for displaying debug information
 enum ENUM_BIAS { BIAS_BULL, BIAS_BEAR, BIAS_NEUTRAL };
 enum ENUM_ZONE { ZONE_DEMAND, ZONE_SUPPLY, ZONE_NONE };
 enum ENUM_ZONE_INTERACTION { INTERACTION_DEMAND, INTERACTION_SUPPLY, INTERACTION_NONE };
-enum ENUM_TRADE_SIGNAL { SIGNAL_NONE, SIGNAL_BUY, SIGNAL_SELL }; // Updated for clarity
+enum ENUM_TRADE_SIGNAL { SIGNAL_NONE, SIGNAL_BUY, SIGNAL_SELL };
+enum ENUM_HEATMAP_STATUS { HEATMAP_NONE, HEATMAP_DEMAND, HEATMAP_SUPPLY };
+enum ENUM_MAGNET_RELATION { RELATION_ABOVE, RELATION_BELOW, RELATION_AT }; // NEW: Enum for Magnet Relation
 
 // --- Structs for Data Handling
 struct LiveTradeData { bool trade_exists; double entry, sl, tp; };
@@ -26,7 +30,7 @@ struct CompassData { ENUM_BIAS bias; double confidence; };
 
 // --- Constants for Panel Layout
 #define PANE_PREFIX "AlfredPane_"
-#define PANE_WIDTH 230 // Slightly wider for better spacing
+#define PANE_WIDTH 230
 #define PANE_X_POS 15
 #define PANE_Y_POS 15
 #define PANE_BG_COLOR clrDimGray
@@ -50,11 +54,16 @@ struct CompassData { ENUM_BIAS bias; double confidence; };
 #define COLOR_SEPARATOR clrGray
 #define COLOR_NA clrGray
 #define COLOR_NO_SIGNAL clrGray
+#define COLOR_HIGHLIGHT_DEMAND (color)ColorToARGB(clrDarkGreen, 100)
+#define COLOR_HIGHLIGHT_SUPPLY (color)ColorToARGB(clrMaroon, 100)
+#define COLOR_HIGHLIGHT_NONE (color)ColorToARGB(clrGray, 50)
+#define COLOR_MAGNET_AT clrGoldenrod
 
 // --- Font Sizes & Spacing
 #define FONT_SIZE_NORMAL 8
 #define FONT_SIZE_HEADER 9
 #define FONT_SIZE_SIGNAL 10
+#define FONT_SIZE_SIGNAL_ACTIVE 11
 #define SPACING_MEDIUM 16
 #define SPACING_LARGE 24
 #define SPACING_SEPARATOR 12
@@ -67,6 +76,8 @@ bool g_hud_expanded = true;
 double g_pip_value;
 string g_timeframe_strings[] = {"M1", "M5", "M15", "M30", "H1", "H4", "D1"};
 ENUM_TIMEFRAMES g_timeframes[] = {PERIOD_M1, PERIOD_M5, PERIOD_M15, PERIOD_M30, PERIOD_H1, PERIOD_H4, PERIOD_D1};
+string g_heatmap_tf_strings[] = {"M15", "H1", "H4", "D1"};
+ENUM_TIMEFRAMES g_heatmap_tfs[] = {PERIOD_M15, PERIOD_H1, PERIOD_H4, PERIOD_D1};
 
 
 //+------------------------------------------------------------------+
@@ -74,19 +85,32 @@ ENUM_TIMEFRAMES g_timeframes[] = {PERIOD_M1, PERIOD_M5, PERIOD_M15, PERIOD_M30, 
 //+------------------------------------------------------------------+
 double GetCurrentTP() { return SymbolInfoDouble(_Symbol, SYMBOL_BID) + (50 * g_pip_value); }
 double GetCurrentSL() { return SymbolInfoDouble(_Symbol, SYMBOL_BID) - (50 * g_pip_value); }
-
-// UPDATED: Mock function for trade signal
 ENUM_TRADE_SIGNAL GetTradeSignal()
 {
     long time_cycle = TimeCurrent() / 10;
     switch(time_cycle % 3) { case 0: return SIGNAL_BUY; case 1: return SIGNAL_SELL; default: return SIGNAL_NONE; }
 }
-
-ENUM_ZONE_INTERACTION GetZoneInteraction()
+ENUM_ZONE_INTERACTION GetCurrentZoneInteraction()
 {
     long time_cycle = TimeCurrent() / 15;
     switch(time_cycle % 3) { case 0: return INTERACTION_DEMAND; case 1: return INTERACTION_SUPPLY; default: return INTERACTION_NONE; }
 }
+ENUM_HEATMAP_STATUS GetZoneHeatmapStatus(ENUM_TIMEFRAMES tf)
+{
+    long time_cycle = TimeCurrent() / (5 * (int)tf);
+    switch(time_cycle % 5) { case 0: return HEATMAP_DEMAND; case 1: return HEATMAP_SUPPLY; default: return HEATMAP_NONE; }
+}
+
+// NEW: Mock functions for Magnet Projection
+double GetMagnetProjectionLevel() { return iClose(_Symbol, _Period, 1) + 20 * _Point; } // Use previous close for stability
+ENUM_MAGNET_RELATION GetMagnetProjectionRelation(double price, double magnet)
+{
+    double proximity = 5 * _Point; // 5 points proximity to be considered "At"
+    if(price > magnet + proximity) return RELATION_ABOVE;
+    if(price < magnet - proximity) return RELATION_BELOW;
+    return RELATION_AT;
+}
+
 
 CompassData GetCompassData(ENUM_TIMEFRAMES tf)
 {
@@ -134,8 +158,15 @@ string ZoneToString(ENUM_ZONE z) { switch(z){case ZONE_DEMAND:case ZONE_SUPPLY:r
 color  ZoneToColor(ENUM_ZONE z) { switch(z){case ZONE_DEMAND:return COLOR_DEMAND;case ZONE_SUPPLY:return COLOR_SUPPLY;}return COLOR_NA;}
 string SignalToString(ENUM_TRADE_SIGNAL s){switch(s){case SIGNAL_BUY:return"BUY";case SIGNAL_SELL:return"SELL";}return"NO SIGNAL";}
 color  SignalToColor(ENUM_TRADE_SIGNAL s){switch(s){case SIGNAL_BUY:return COLOR_BULL;case SIGNAL_SELL:return COLOR_BEAR;}return COLOR_NO_SIGNAL;}
-string ZoneInteractionToString(ENUM_ZONE_INTERACTION z){switch(z){case INTERACTION_DEMAND:return"INSIDE DEMAND";case INTERACTION_SUPPLY:return"INSIDE SUPPLY";}return"OUTSIDE ZONES";}
+string ZoneInteractionToString(ENUM_ZONE_INTERACTION z){switch(z){case INTERACTION_DEMAND:return"INSIDE DEMAND";case INTERACTION_SUPPLY:return"INSIDE SUPPLY";}return"NO ZONE INTERACTION";}
 color  ZoneInteractionToColor(ENUM_ZONE_INTERACTION z){switch(z){case INTERACTION_DEMAND:return COLOR_DEMAND;case INTERACTION_SUPPLY:return COLOR_SUPPLY;}return COLOR_NA;}
+color  ZoneInteractionToHighlightColor(ENUM_ZONE_INTERACTION z){switch(z){case INTERACTION_DEMAND:return COLOR_HIGHLIGHT_DEMAND;case INTERACTION_SUPPLY:return COLOR_HIGHLIGHT_SUPPLY;}return COLOR_HIGHLIGHT_NONE;}
+string HeatmapStatusToString(ENUM_HEATMAP_STATUS s) { switch(s) { case HEATMAP_DEMAND: return "D"; case HEATMAP_SUPPLY: return "S"; } return "-"; }
+color  HeatmapStatusToColor(ENUM_HEATMAP_STATUS s) { switch(s) { case HEATMAP_DEMAND: return COLOR_DEMAND; case HEATMAP_SUPPLY: return COLOR_SUPPLY; } return COLOR_NA; }
+// NEW: Helpers for Magnet Projection
+string MagnetRelationToString(ENUM_MAGNET_RELATION r) { switch(r) { case RELATION_ABOVE: return "(Above)"; case RELATION_BELOW: return "(Below)"; } return "(At)"; }
+color  MagnetRelationToColor(ENUM_MAGNET_RELATION r) { switch(r) { case RELATION_ABOVE: return COLOR_BULL; case RELATION_BELOW: return COLOR_BEAR; } return COLOR_MAGNET_AT; }
+
 
 //+------------------------------------------------------------------+
 //|                       UI DRAWING HELPERS                         |
@@ -190,8 +221,35 @@ void CreatePanel()
     
     // --- Zone Interaction Status Section
     CreateLabel("zone_interaction_header", "ZONE STATUS", x_col1, y_offset, COLOR_HEADER, FONT_SIZE_HEADER); y_offset += SPACING_MEDIUM;
-    CreateLabel("zone_interaction_status", "OUTSIDE ZONES", x_col1, y_offset, COLOR_NA, FONT_SIZE_NORMAL); y_offset += SPACING_MEDIUM;
+    CreateRectangle("zone_interaction_highlight", x_col1 - 5, y_offset - 2, PANE_WIDTH - 20, 14, COLOR_HIGHLIGHT_NONE);
+    CreateLabel("zone_interaction_status", "NO ZONE INTERACTION", x_col1, y_offset, COLOR_NA, FONT_SIZE_NORMAL); y_offset += SPACING_MEDIUM;
     DrawSeparator("sep_zone", y_offset, x_offset);
+
+    // --- Zone Heatmap Section
+    if(ShowZoneHeatmap)
+    {
+        CreateLabel("heatmap_header", "ZONE HEATMAP", x_col1, y_offset, COLOR_HEADER, FONT_SIZE_HEADER); y_offset += SPACING_MEDIUM;
+        int heatmap_x = x_col1 + 20;
+        for(int i = 0; i < ArraySize(g_heatmap_tf_strings); i++)
+        {
+            string tf = g_heatmap_tf_strings[i];
+            CreateLabel("heatmap_tf_"+tf, tf, heatmap_x, y_offset, COLOR_HEADER, FONT_SIZE_NORMAL, ANCHOR_CENTER);
+            CreateLabel("heatmap_status_"+tf, "-", heatmap_x, y_offset + 12, COLOR_NA, FONT_SIZE_NORMAL, ANCHOR_CENTER);
+            heatmap_x += 45;
+        }
+        y_offset += SPACING_LARGE;
+        DrawSeparator("sep_heatmap", y_offset, x_offset);
+    }
+    
+    // --- NEW: Magnet Projection Section ---
+    if(ShowMagnetProjection)
+    {
+        CreateLabel("magnet_header", "MAGNET PROJECTION", x_col1, y_offset, COLOR_HEADER, FONT_SIZE_HEADER); y_offset += SPACING_MEDIUM;
+        CreateLabel("magnet_level", "Magnet → ---", x_col1, y_offset, COLOR_NEUTRAL_TEXT, FONT_SIZE_NORMAL + 1);
+        CreateLabel("magnet_relation", "(---)", x_col1 + 150, y_offset, COLOR_NA, FONT_SIZE_NORMAL);
+        y_offset += SPACING_MEDIUM;
+        DrawSeparator("sep_magnet", y_offset, x_offset);
+    }
 
     // --- HUD Metrics Section
     CreateLabel("hud_header", "HUD Metrics", x_col1, y_offset, COLOR_HEADER, FONT_SIZE_HEADER);
@@ -260,8 +318,34 @@ void UpdatePanel()
     }
     
     // --- Update Zone Interaction Status
-    ENUM_ZONE_INTERACTION interaction = GetZoneInteraction();
+    ENUM_ZONE_INTERACTION interaction = GetCurrentZoneInteraction();
     UpdateLabel("zone_interaction_status", ZoneInteractionToString(interaction), ZoneInteractionToColor(interaction));
+    string highlight_obj = PANE_PREFIX + "zone_interaction_highlight";
+    ObjectSetInteger(0, highlight_obj, OBJPROP_BGCOLOR, ZoneInteractionToHighlightColor(interaction));
+
+    // --- Update Zone Heatmap
+    if(ShowZoneHeatmap)
+    {
+        for(int i = 0; i < ArraySize(g_heatmap_tfs); i++)
+        {
+            ENUM_TIMEFRAMES tf = g_heatmap_tfs[i];
+            string tf_str = g_heatmap_tf_strings[i];
+            ENUM_HEATMAP_STATUS status = GetZoneHeatmapStatus(tf);
+            UpdateLabel("heatmap_status_"+tf_str, HeatmapStatusToString(status), HeatmapStatusToColor(status));
+        }
+    }
+    
+    // --- Update Magnet Projection
+    if(ShowMagnetProjection)
+    {
+        double magnet_level = GetMagnetProjectionLevel();
+        double current_price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+        ENUM_MAGNET_RELATION relation = GetMagnetProjectionRelation(current_price, magnet_level);
+        
+        string price_format = "%." + IntegerToString(_Digits) + "f";
+        UpdateLabel("magnet_level", "Magnet → " + StringFormat(price_format, magnet_level), COLOR_NEUTRAL_TEXT);
+        UpdateLabel("magnet_relation", MagnetRelationToString(relation), MagnetRelationToColor(relation));
+    }
 
     // --- Update HUD Metrics
     if(g_hud_expanded)
@@ -270,13 +354,17 @@ void UpdatePanel()
         double atr_buffer[1]; if(CopyBuffer(hATR_current, 0, 0, 1, atr_buffer) > 0) { UpdateLabel("hud_atr_val", DoubleToString(atr_buffer[0], _Digits), COLOR_NEUTRAL_TEXT); }
     }
     
-    // --- Update Final Signal
+    // --- Update Final Signal with Dynamic Confidence
     CompassData h1_compass = GetCompassData(PERIOD_H1);
     UpdateLabel("signal_dir_value", BiasToString(h1_compass.bias), BiasToColor(h1_compass.bias));
-    double conf = h1_compass.confidence;
-    color conf_color = conf > 70 ? COLOR_CONF_HIGH : conf > 40 ? COLOR_CONF_MED : COLOR_CONF_LOW;
-    UpdateLabel("signal_conf_percent", StringFormat("(%.0f%%)", conf), conf_color);
-    int bar_width = (int)(conf / 100.0 * CONFIDENCE_BAR_MAX_WIDTH);
+    double base_conf = h1_compass.confidence;
+    double adjusted_conf = base_conf;
+    if(interaction == INTERACTION_DEMAND && h1_compass.bias == BIAS_BULL) { adjusted_conf += 5; }
+    if(interaction == INTERACTION_SUPPLY && h1_compass.bias == BIAS_BEAR) { adjusted_conf += 5; }
+    adjusted_conf = MathMin(100, adjusted_conf);
+    color conf_color = adjusted_conf > 70 ? COLOR_CONF_HIGH : adjusted_conf > 40 ? COLOR_CONF_MED : COLOR_CONF_LOW;
+    UpdateLabel("signal_conf_percent", StringFormat("(%.0f%%)", adjusted_conf), conf_color);
+    int bar_width = (int)(adjusted_conf / 100.0 * CONFIDENCE_BAR_MAX_WIDTH);
     string bar_name = PANE_PREFIX + "signal_conf_bar_fg";
     ObjectSetInteger(0, bar_name, OBJPROP_XSIZE, bar_width); ObjectSetInteger(0, bar_name, OBJPROP_BGCOLOR, conf_color); ObjectSetInteger(0, bar_name, OBJPROP_COLOR, conf_color);
     ENUM_ZONE h1_zone = GetZoneStatus(PERIOD_H1); UpdateLabel("magnet_zone_value", ZoneToString(h1_zone), ZoneToColor(h1_zone));
@@ -305,15 +393,21 @@ void UpdatePanel()
         DrawOrUpdatePriceLine("sl", mock_sl, COLOR_BEAR);
     }
     
-    // --- Update Trade Signal
+    // --- Update Trade Signal with Enlarged Font
     ENUM_TRADE_SIGNAL signal = GetTradeSignal();
     string signal_obj = PANE_PREFIX + "trade_signal_status";
     ObjectSetString(0, signal_obj, OBJPROP_TEXT, SignalToString(signal));
     ObjectSetInteger(0, signal_obj, OBJPROP_COLOR, SignalToColor(signal));
-    // Set font style
-    if(signal == SIGNAL_NONE) ObjectSetString(0, signal_obj, OBJPROP_FONT, "Arial Italic");
-    else ObjectSetString(0, signal_obj, OBJPROP_FONT, "Arial Bold");
-
+    if(signal == SIGNAL_NONE)
+    {
+        ObjectSetString(0, signal_obj, OBJPROP_FONT, "Arial Italic");
+        ObjectSetInteger(0, signal_obj, OBJPROP_FONTSIZE, FONT_SIZE_SIGNAL);
+    }
+    else
+    {
+        ObjectSetString(0, signal_obj, OBJPROP_FONT, "Arial Bold");
+        ObjectSetInteger(0, signal_obj, OBJPROP_FONTSIZE, FONT_SIZE_SIGNAL_ACTIVE);
+    }
 
     ChartRedraw();
 }
