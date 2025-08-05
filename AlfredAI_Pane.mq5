@@ -1,6 +1,6 @@
 //+------------------------------------------------------------------+
 //|                        AlfredAI_Pane.mq5                         |
-//|         v2.6 - Added Dynamic Magnet Projection Status            |
+//|             v2.8 - Added Confidence Matrix Section               |
 //|                    Copyright 2024, RudiKai                       |
 //|                     https://github.com/RudiKai                   |
 //+------------------------------------------------------------------+
@@ -11,7 +11,9 @@
 // --- Optional Inputs ---
 input bool ShowDebugInfo = false;          // Toggle for displaying debug information
 input bool ShowZoneHeatmap = true;         // Toggle for the Zone Heatmap
-input bool ShowMagnetProjection = true;    // NEW: Toggle for the Magnet Projection status
+input bool ShowMagnetProjection = true;    // Toggle for the Magnet Projection status
+input bool ShowMultiTFMagnets = true;      // Toggle for the Multi-TF Magnet Summary
+input bool ShowConfidenceMatrix = true;    // NEW: Toggle for the Confidence Matrix
 
 // --- Includes
 #include <ChartObjects\ChartObjectsTxtControls.mqh>
@@ -22,11 +24,16 @@ enum ENUM_ZONE { ZONE_DEMAND, ZONE_SUPPLY, ZONE_NONE };
 enum ENUM_ZONE_INTERACTION { INTERACTION_DEMAND, INTERACTION_SUPPLY, INTERACTION_NONE };
 enum ENUM_TRADE_SIGNAL { SIGNAL_NONE, SIGNAL_BUY, SIGNAL_SELL };
 enum ENUM_HEATMAP_STATUS { HEATMAP_NONE, HEATMAP_DEMAND, HEATMAP_SUPPLY };
-enum ENUM_MAGNET_RELATION { RELATION_ABOVE, RELATION_BELOW, RELATION_AT }; // NEW: Enum for Magnet Relation
+enum ENUM_MAGNET_RELATION { RELATION_ABOVE, RELATION_BELOW, RELATION_AT };
+// NEW: Enum for Matrix Confidence Score
+enum ENUM_MATRIX_CONFIDENCE { CONFIDENCE_WEAK, CONFIDENCE_MEDIUM, CONFIDENCE_STRONG };
 
 // --- Structs for Data Handling
 struct LiveTradeData { bool trade_exists; double entry, sl, tp; };
 struct CompassData { ENUM_BIAS bias; double confidence; };
+// NEW: Struct for Confidence Matrix row data
+struct MatrixRowData { ENUM_BIAS bias; ENUM_ZONE zone; ENUM_MAGNET_RELATION magnet; ENUM_MATRIX_CONFIDENCE score; };
+
 
 // --- Constants for Panel Layout
 #define PANE_PREFIX "AlfredPane_"
@@ -58,6 +65,10 @@ struct CompassData { ENUM_BIAS bias; double confidence; };
 #define COLOR_HIGHLIGHT_SUPPLY (color)ColorToARGB(clrMaroon, 100)
 #define COLOR_HIGHLIGHT_NONE (color)ColorToARGB(clrGray, 50)
 #define COLOR_MAGNET_AT clrGoldenrod
+#define COLOR_TEXT_DIM clrSilver
+#define COLOR_MATRIX_STRONG (color)ColorToARGB(clrDarkGreen, 120)
+#define COLOR_MATRIX_MEDIUM (color)ColorToARGB(clrGoldenrod, 100)
+#define COLOR_MATRIX_WEAK (color)ColorToARGB(clrMaroon, 120)
 
 // --- Font Sizes & Spacing
 #define FONT_SIZE_NORMAL 8
@@ -78,6 +89,11 @@ string g_timeframe_strings[] = {"M1", "M5", "M15", "M30", "H1", "H4", "D1"};
 ENUM_TIMEFRAMES g_timeframes[] = {PERIOD_M1, PERIOD_M5, PERIOD_M15, PERIOD_M30, PERIOD_H1, PERIOD_H4, PERIOD_D1};
 string g_heatmap_tf_strings[] = {"M15", "H1", "H4", "D1"};
 ENUM_TIMEFRAMES g_heatmap_tfs[] = {PERIOD_M15, PERIOD_H1, PERIOD_H4, PERIOD_D1};
+string g_magnet_summary_tf_strings[] = {"M15", "H1", "H4", "D1"};
+ENUM_TIMEFRAMES g_magnet_summary_tfs[] = {PERIOD_M15, PERIOD_H1, PERIOD_H4, PERIOD_D1};
+// NEW: Timeframes for the Confidence Matrix
+string g_matrix_tf_strings[] = {"M15", "H1", "H4", "D1"};
+ENUM_TIMEFRAMES g_matrix_tfs[] = {PERIOD_M15, PERIOD_H1, PERIOD_H4, PERIOD_D1};
 
 
 //+------------------------------------------------------------------+
@@ -100,15 +116,48 @@ ENUM_HEATMAP_STATUS GetZoneHeatmapStatus(ENUM_TIMEFRAMES tf)
     long time_cycle = TimeCurrent() / (5 * (int)tf);
     switch(time_cycle % 5) { case 0: return HEATMAP_DEMAND; case 1: return HEATMAP_SUPPLY; default: return HEATMAP_NONE; }
 }
-
-// NEW: Mock functions for Magnet Projection
-double GetMagnetProjectionLevel() { return iClose(_Symbol, _Period, 1) + 20 * _Point; } // Use previous close for stability
+double GetMagnetProjectionLevel() { return iClose(_Symbol, _Period, 1) + 20 * _Point; }
 ENUM_MAGNET_RELATION GetMagnetProjectionRelation(double price, double magnet)
 {
-    double proximity = 5 * _Point; // 5 points proximity to be considered "At"
+    double proximity = 5 * _Point;
     if(price > magnet + proximity) return RELATION_ABOVE;
     if(price < magnet - proximity) return RELATION_BELOW;
     return RELATION_AT;
+}
+double GetMagnetLevelTF(ENUM_TIMEFRAMES tf) { return iClose(_Symbol, tf, 1) + (MathRand()%100-50)*_Point; }
+ENUM_MAGNET_RELATION GetMagnetRelationTF(double price, double magnet) {
+   if(price>magnet) return RELATION_ABOVE;
+   if(price<magnet) return RELATION_BELOW;
+   return RELATION_AT;
+}
+
+// NEW: Mock function for Confidence Matrix data
+MatrixRowData GetConfidenceMatrixRow(ENUM_TIMEFRAMES tf)
+{
+    MatrixRowData data;
+    
+    // 1. Get data from existing mock functions
+    data.bias = GetCompassData(tf).bias;
+    data.zone = GetZoneStatus(tf);
+    data.magnet = GetMagnetRelationTF(SymbolInfoDouble(_Symbol, SYMBOL_BID), GetMagnetLevelTF(tf));
+
+    // 2. Calculate alignment score
+    int score = 0;
+    if(data.bias == BIAS_BULL && data.zone == ZONE_DEMAND) score++;
+    if(data.bias == BIAS_BULL && data.magnet == RELATION_ABOVE) score++;
+    if(data.bias == BIAS_BEAR && data.zone == ZONE_SUPPLY) score++;
+    if(data.bias == BIAS_BEAR && data.magnet == RELATION_BELOW) score++;
+    
+    // A third alignment check (zone and magnet)
+    if(data.zone == ZONE_DEMAND && data.magnet == RELATION_ABOVE) score++;
+    if(data.zone == ZONE_SUPPLY && data.magnet == RELATION_BELOW) score++;
+
+    // 3. Assign confidence level
+    if(score >= 2) data.score = CONFIDENCE_STRONG;
+    else if (score == 1) data.score = CONFIDENCE_MEDIUM;
+    else data.score = CONFIDENCE_WEAK;
+
+    return data;
 }
 
 
@@ -154,7 +203,7 @@ LiveTradeData FetchTradeLevels()
 double CalculatePips(double p1, double p2) { if(g_pip_value==0||p1==0||p2==0) return 0; return MathAbs(p1-p2)/g_pip_value; }
 string BiasToString(ENUM_BIAS b) { switch(b){case BIAS_BULL:return"BULL";case BIAS_BEAR:return"BEAR";}return"NEUTRAL";}
 color  BiasToColor(ENUM_BIAS b) { switch(b){case BIAS_BULL:return COLOR_BULL;case BIAS_BEAR:return COLOR_BEAR;}return COLOR_NEUTRAL_BIAS;}
-string ZoneToString(ENUM_ZONE z) { switch(z){case ZONE_DEMAND:case ZONE_SUPPLY:return"Active";}return"---";}
+string ZoneToString(ENUM_ZONE z) { switch(z){case ZONE_DEMAND:return"Demand";case ZONE_SUPPLY:return"Supply";}return"None";}
 color  ZoneToColor(ENUM_ZONE z) { switch(z){case ZONE_DEMAND:return COLOR_DEMAND;case ZONE_SUPPLY:return COLOR_SUPPLY;}return COLOR_NA;}
 string SignalToString(ENUM_TRADE_SIGNAL s){switch(s){case SIGNAL_BUY:return"BUY";case SIGNAL_SELL:return"SELL";}return"NO SIGNAL";}
 color  SignalToColor(ENUM_TRADE_SIGNAL s){switch(s){case SIGNAL_BUY:return COLOR_BULL;case SIGNAL_SELL:return COLOR_BEAR;}return COLOR_NO_SIGNAL;}
@@ -163,9 +212,12 @@ color  ZoneInteractionToColor(ENUM_ZONE_INTERACTION z){switch(z){case INTERACTIO
 color  ZoneInteractionToHighlightColor(ENUM_ZONE_INTERACTION z){switch(z){case INTERACTION_DEMAND:return COLOR_HIGHLIGHT_DEMAND;case INTERACTION_SUPPLY:return COLOR_HIGHLIGHT_SUPPLY;}return COLOR_HIGHLIGHT_NONE;}
 string HeatmapStatusToString(ENUM_HEATMAP_STATUS s) { switch(s) { case HEATMAP_DEMAND: return "D"; case HEATMAP_SUPPLY: return "S"; } return "-"; }
 color  HeatmapStatusToColor(ENUM_HEATMAP_STATUS s) { switch(s) { case HEATMAP_DEMAND: return COLOR_DEMAND; case HEATMAP_SUPPLY: return COLOR_SUPPLY; } return COLOR_NA; }
-// NEW: Helpers for Magnet Projection
 string MagnetRelationToString(ENUM_MAGNET_RELATION r) { switch(r) { case RELATION_ABOVE: return "(Above)"; case RELATION_BELOW: return "(Below)"; } return "(At)"; }
 color  MagnetRelationToColor(ENUM_MAGNET_RELATION r) { switch(r) { case RELATION_ABOVE: return COLOR_BULL; case RELATION_BELOW: return COLOR_BEAR; } return COLOR_MAGNET_AT; }
+string MagnetRelationTFToString(ENUM_MAGNET_RELATION r) { switch(r) { case RELATION_ABOVE: return "Above"; case RELATION_BELOW: return "Below"; } return "At"; }
+color  MagnetRelationTFToColor(ENUM_MAGNET_RELATION r) { switch(r) { case RELATION_ABOVE: return COLOR_BULL; case RELATION_BELOW: return COLOR_BEAR; } return COLOR_MAGNET_AT; }
+// NEW: Helpers for Confidence Matrix
+color MatrixScoreToColor(ENUM_MATRIX_CONFIDENCE s) { switch(s) { case CONFIDENCE_STRONG: return COLOR_MATRIX_STRONG; case CONFIDENCE_MEDIUM: return COLOR_MATRIX_MEDIUM; } return COLOR_MATRIX_WEAK; }
 
 
 //+------------------------------------------------------------------+
@@ -241,7 +293,7 @@ void CreatePanel()
         DrawSeparator("sep_heatmap", y_offset, x_offset);
     }
     
-    // --- NEW: Magnet Projection Section ---
+    // --- Magnet Projection Section
     if(ShowMagnetProjection)
     {
         CreateLabel("magnet_header", "MAGNET PROJECTION", x_col1, y_offset, COLOR_HEADER, FONT_SIZE_HEADER); y_offset += SPACING_MEDIUM;
@@ -250,6 +302,47 @@ void CreatePanel()
         y_offset += SPACING_MEDIUM;
         DrawSeparator("sep_magnet", y_offset, x_offset);
     }
+    
+    // --- Multi-TF Magnet Summary Section
+    if(ShowMultiTFMagnets)
+    {
+        CreateLabel("mtf_magnet_header", "MULTI-TF MAGNETS", x_col1, y_offset, COLOR_HEADER, FONT_SIZE_HEADER); y_offset += SPACING_MEDIUM;
+        int mtf_magnet_x1 = x_col1, mtf_magnet_x2 = x_col1 + 70, mtf_magnet_x3 = x_col1 + 140;
+        for(int i = 0; i < ArraySize(g_magnet_summary_tfs); i++)
+        {
+            string tf = g_magnet_summary_tf_strings[i];
+            CreateLabel("mtf_magnet_tf_"+tf, tf + " →", mtf_magnet_x1, y_offset, COLOR_HEADER);
+            CreateLabel("mtf_magnet_relation_"+tf, "---", mtf_magnet_x2, y_offset, COLOR_NA);
+            CreateLabel("mtf_magnet_level_"+tf, "(---)", mtf_magnet_x3, y_offset, COLOR_NA);
+            y_offset += SPACING_MEDIUM;
+        }
+        DrawSeparator("sep_mtf_magnet", y_offset, x_offset);
+    }
+    
+    // --- NEW: Confidence Matrix Section ---
+    if(ShowConfidenceMatrix)
+    {
+        CreateLabel("matrix_header", "CONFIDENCE MATRIX", x_col1, y_offset, COLOR_HEADER, FONT_SIZE_HEADER); y_offset += SPACING_MEDIUM;
+        // Header Row
+        CreateLabel("matrix_hdr_tf", "TF", x_col1, y_offset, COLOR_HEADER);
+        CreateLabel("matrix_hdr_bias", "Bias", x_col1 + 40, y_offset, COLOR_HEADER);
+        CreateLabel("matrix_hdr_zone", "Zone", x_col1 + 100, y_offset, COLOR_HEADER);
+        CreateLabel("matrix_hdr_magnet", "Magnet", x_col1 + 160, y_offset, COLOR_HEADER);
+        y_offset += SPACING_MEDIUM;
+        
+        for(int i = 0; i < ArraySize(g_matrix_tfs); i++)
+        {
+            string tf = g_matrix_tf_strings[i];
+            CreateRectangle("matrix_bg_"+tf, x_col1 - 5, y_offset - 2, PANE_WIDTH - 20, 14, clrNONE);
+            CreateLabel("matrix_tf_"+tf, tf, x_col1, y_offset, COLOR_NEUTRAL_TEXT);
+            CreateLabel("matrix_bias_"+tf, "---", x_col1 + 40, y_offset, COLOR_NA);
+            CreateLabel("matrix_zone_"+tf, "---", x_col1 + 100, y_offset, COLOR_NA);
+            CreateLabel("matrix_magnet_"+tf, "---", x_col1 + 160, y_offset, COLOR_NA);
+            y_offset += SPACING_MEDIUM;
+        }
+        DrawSeparator("sep_matrix", y_offset, x_offset);
+    }
+
 
     // --- HUD Metrics Section
     CreateLabel("hud_header", "HUD Metrics", x_col1, y_offset, COLOR_HEADER, FONT_SIZE_HEADER);
@@ -345,6 +438,55 @@ void UpdatePanel()
         string price_format = "%." + IntegerToString(_Digits) + "f";
         UpdateLabel("magnet_level", "Magnet → " + StringFormat(price_format, magnet_level), COLOR_NEUTRAL_TEXT);
         UpdateLabel("magnet_relation", MagnetRelationToString(relation), MagnetRelationToColor(relation));
+    }
+    
+    // --- Update Multi-TF Magnet Summary
+    if(ShowMultiTFMagnets)
+    {
+        double current_price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+        for(int i = 0; i < ArraySize(g_magnet_summary_tfs); i++)
+        {
+            ENUM_TIMEFRAMES tf = g_magnet_summary_tfs[i];
+            string tf_str = g_magnet_summary_tf_strings[i];
+            
+            double magnet_level = GetMagnetLevelTF(tf);
+            ENUM_MAGNET_RELATION relation = GetMagnetRelationTF(current_price, magnet_level);
+            
+            color relation_color = MagnetRelationTFToColor(relation);
+            if(tf == PERIOD_M15) { relation_color = COLOR_TEXT_DIM; }
+            
+            string price_format = "(%." + IntegerToString(_Digits) + "f)";
+            
+            UpdateLabel("mtf_magnet_relation_"+tf_str, MagnetRelationTFToString(relation), relation_color);
+            UpdateLabel("mtf_magnet_level_"+tf_str, StringFormat(price_format, magnet_level), relation_color);
+        }
+    }
+    
+    // --- NEW: Update Confidence Matrix ---
+    if(ShowConfidenceMatrix)
+    {
+        for(int i = 0; i < ArraySize(g_matrix_tfs); i++)
+        {
+            ENUM_TIMEFRAMES tf = g_matrix_tfs[i];
+            string tf_str = g_matrix_tf_strings[i];
+            
+            MatrixRowData data = GetConfidenceMatrixRow(tf);
+            
+            // Update the labels
+            UpdateLabel("matrix_bias_"+tf_str, BiasToString(data.bias), BiasToColor(data.bias));
+            UpdateLabel("matrix_zone_"+tf_str, ZoneToString(data.zone), ZoneToColor(data.zone));
+            UpdateLabel("matrix_magnet_"+tf_str, MagnetRelationTFToString(data.magnet), MagnetRelationTFToColor(data.magnet));
+            
+            // Update background color and font style
+            string bg_obj = PANE_PREFIX + "matrix_bg_" + tf_str;
+            ObjectSetInteger(0, bg_obj, OBJPROP_BGCOLOR, MatrixScoreToColor(data.score));
+            
+            string font_style = (data.score == CONFIDENCE_STRONG) ? "Arial Bold" : "Arial";
+            ObjectSetString(0, PANE_PREFIX + "matrix_tf_"+tf_str, OBJPROP_FONT, font_style);
+            ObjectSetString(0, PANE_PREFIX + "matrix_bias_"+tf_str, OBJPROP_FONT, font_style);
+            ObjectSetString(0, PANE_PREFIX + "matrix_zone_"+tf_str, OBJPROP_FONT, font_style);
+            ObjectSetString(0, PANE_PREFIX + "matrix_magnet_"+tf_str, OBJPROP_FONT, font_style);
+        }
     }
 
     // --- Update HUD Metrics
