@@ -1,27 +1,38 @@
 //+------------------------------------------------------------------+
 //|                        AlfredAI_Pane.mq5                         |
-//|             v1.0 - Final Version with Footer & Diagnostics       |
-//|                    Copyright 2024, RudiKai                       |
+//|             v1.1 - Upgraded with Live Data Integration           |
+//|                                                                  |
+//| Copyright 2024, RudiKai                                          |
 //|                     https://github.com/RudiKai                   |
 //+------------------------------------------------------------------+
 #property strict
 #property indicator_chart_window
 #property indicator_plots 0 // Suppress "no indicator plot" warning
-#property version "1.0"
+#property version "1.1"
 
 // --- Optional Inputs ---
-input bool ShowDebugInfo = false;          // Toggle for displaying debug information
+input bool ShowDebugInfo = false;
+// Toggle for displaying debug information
 input bool ShowZoneHeatmap = true;         // Toggle for the Zone Heatmap
-input bool ShowMagnetProjection = true;    // Toggle for the Magnet Projection status
-input bool ShowMultiTFMagnets = true;      // Toggle for the Multi-TF Magnet Summary
-input bool ShowConfidenceMatrix = true;    // Toggle for the Confidence Matrix
+input bool ShowMagnetProjection = true;
+// Toggle for the Magnet Projection status
+input bool ShowMultiTFMagnets = true;
+// Toggle for the Multi-TF Magnet Summary
+input bool ShowConfidenceMatrix = true;
+// Toggle for the Confidence Matrix
 input bool ShowTradeRecommendation = true; // Toggle for the Trade Recommendation
-input bool ShowRiskModule = true;          // Toggle for the Risk & Positioning module
-input bool ShowSessionModule = true;       // Toggle for the Session & Volatility module
-input bool ShowNewsModule = true;          // Toggle for the Upcoming News module
-input bool ShowEmotionalState = true;      // Toggle for the Emotional State module
-input bool ShowAlertCenter = true;         // Toggle for the Alert Center module
-input bool ShowPaneSettings = true;        // Toggle for the Pane Settings summary module
+input bool ShowRiskModule = true;
+// Toggle for the Risk & Positioning module
+input bool ShowSessionModule = true;
+// Toggle for the Session & Volatility module
+input bool ShowNewsModule = true;
+// Toggle for the Upcoming News module
+input bool ShowEmotionalState = true;
+// Toggle for the Emotional State module
+input bool ShowAlertCenter = true;
+// Toggle for the Alert Center module
+input bool ShowPaneSettings = true;
+// Toggle for the Pane Settings summary module
 
 // --- Includes
 #include <ChartObjects\ChartObjectsTxtControls.mqh>
@@ -39,18 +50,24 @@ enum ENUM_NEWS_IMPACT { IMPACT_LOW, IMPACT_MEDIUM, IMPACT_HIGH };
 enum ENUM_EMOTIONAL_STATE { STATE_CAUTIOUS, STATE_CONFIDENT, STATE_OVEREXTENDED, STATE_ANXIOUS, STATE_NEUTRAL };
 enum ENUM_ALERT_STATUS { ALERT_NONE, ALERT_PARTIAL, ALERT_STRONG };
 
-
 // --- Structs for Data Handling
 struct LiveTradeData { bool trade_exists; double entry, sl, tp; };
-struct CompassData { ENUM_BIAS bias; double confidence; };
+struct CompassData { ENUM_BIAS bias;
+double confidence; };
 struct MatrixRowData { ENUM_BIAS bias; ENUM_ZONE zone; ENUM_MAGNET_RELATION magnet; ENUM_MATRIX_CONFIDENCE score; };
-struct TradeRecommendation { ENUM_TRADE_SIGNAL action; string reasoning; };
+struct TradeRecommendation { ENUM_TRADE_SIGNAL action;
+string reasoning; };
 struct RiskModuleData { double risk_percent; double position_size; string rr_ratio; };
-struct SessionData { string session_name; string session_overlap; ENUM_VOLATILITY volatility; };
+struct SessionData { string session_name; string session_overlap;
+ENUM_VOLATILITY volatility; };
 struct NewsEventData { string time; string currency; string event_name; ENUM_NEWS_IMPACT impact; };
-struct EmotionalStateData { ENUM_EMOTIONAL_STATE state; string text; };
+struct EmotionalStateData { ENUM_EMOTIONAL_STATE state;
+string text; };
 struct AlertData { ENUM_ALERT_STATUS status; string text; };
 
+// --- Structs for Live Data Caching ---
+struct CachedCompassData { ENUM_BIAS bias; double confidence; };
+struct CachedSupDemData  { ENUM_ZONE zone; double magnet_level; };
 
 // --- Constants for Panel Layout
 #define PANE_PREFIX "AlfredPane_"
@@ -128,12 +145,174 @@ ENUM_TIMEFRAMES g_magnet_summary_tfs[] = {PERIOD_M15, PERIOD_H1, PERIOD_H4, PERI
 string g_matrix_tf_strings[] = {"M15", "H1", "H4", "D1"};
 ENUM_TIMEFRAMES g_matrix_tfs[] = {PERIOD_M15, PERIOD_H1, PERIOD_H4, PERIOD_D1};
 
+// --- Live Data Caches ---
+CachedCompassData g_compass_cache[7];
+CachedSupDemData  g_supdem_cache[7];
+
 
 //+------------------------------------------------------------------+
-//|                  MOCK & REAL DATA FUNCTIONS                      |
+//|               LIVE DATA & CACHING FUNCTIONS                      |
+//+------------------------------------------------------------------+
+// This function is called once per timer tick to update all external indicator data
+void UpdateLiveDataCaches()
+{
+    for(int i = 0; i < ArraySize(g_timeframes); i++)
+    {
+        ENUM_TIMEFRAMES tf = g_timeframes[i];
+
+        // --- Cache AlfredCompass Data (Bias & Confidence) ---
+        int compass_handle = iCustom(_Symbol, tf, "AlfredCompass.ex5");
+        if(compass_handle != INVALID_HANDLE)
+        {
+            double bias_buffer[1], conf_buffer[1];
+            // Buffer 0 for Bias (1=Bull, -1=Bear), Buffer 1 for Confidence
+            if(CopyBuffer(compass_handle, 0, 0, 1, bias_buffer) > 0 &&
+               CopyBuffer(compass_handle, 1, 0, 1, conf_buffer) > 0)
+            {
+                if(bias_buffer[0] > 0.5) g_compass_cache[i].bias = BIAS_BULL;
+                else if(bias_buffer[0] < -0.5) g_compass_cache[i].bias = BIAS_BEAR;
+                else g_compass_cache[i].bias = BIAS_NEUTRAL;
+                g_compass_cache[i].confidence = conf_buffer[0];
+            }
+            else // Fallback on copy error
+            {
+                g_compass_cache[i].bias = BIAS_NEUTRAL;
+                g_compass_cache[i].confidence = 0;
+            }
+        }
+        else // Fallback on handle error
+        {
+            g_compass_cache[i].bias = BIAS_NEUTRAL;
+            g_compass_cache[i].confidence = 0;
+        }
+
+        // --- Cache AlfredSupDemCore Data (Zone & Magnet) ---
+        // IMPORTANT: Assumes AlfredSupDemCore.ex5 uses Buffer 0 for Zone Status and Buffer 1 for Magnet Level.
+        // Please verify buffer indices in the source of AlfredSupDemCore.
+        int supdem_handle = iCustom(_Symbol, tf, "AlfredSupDemCore.ex5");
+        if(supdem_handle != INVALID_HANDLE)
+        {
+            double zone_buffer[1], magnet_buffer[1];
+            // Buffer 0 for Zone Status (1=Demand, -1=Supply, 0=None)
+            if(CopyBuffer(supdem_handle, 0, 0, 1, zone_buffer) > 0)
+            {
+                if(zone_buffer[0] > 0.5) g_supdem_cache[i].zone = ZONE_DEMAND;
+                else if(zone_buffer[0] < -0.5) g_supdem_cache[i].zone = ZONE_SUPPLY;
+                else g_supdem_cache[i].zone = ZONE_NONE;
+            }
+            else // Fallback on copy error
+            {
+                g_supdem_cache[i].zone = ZONE_NONE;
+            }
+            
+            // Buffer 1 for Magnet Projection Level (Price)
+            if(CopyBuffer(supdem_handle, 1, 0, 1, magnet_buffer) > 0)
+            {
+                g_supdem_cache[i].magnet_level = magnet_buffer[0];
+            }
+            else // Fallback on copy error
+            {
+                 g_supdem_cache[i].magnet_level = 0.0;
+            }
+        }
+        else // Fallback on handle error
+        {
+            g_supdem_cache[i].zone = ZONE_NONE;
+            g_supdem_cache[i].magnet_level = 0.0;
+        }
+    }
+}
+
+// Helper to get the correct cache index for a given timeframe
+int GetCacheIndex(ENUM_TIMEFRAMES tf)
+{
+    for(int i = 0; i < ArraySize(g_timeframes); i++)
+    {
+        if(g_timeframes[i] == tf) return i;
+    }
+    return -1; // Not found
+}
+
+
+//+------------------------------------------------------------------+
+//|                   LIVE & MOCK DATA FUNCTIONS                     |
 //+------------------------------------------------------------------+
 double GetCurrentTP() { return SymbolInfoDouble(_Symbol, SYMBOL_BID) + (50 * g_pip_value); }
 double GetCurrentSL() { return SymbolInfoDouble(_Symbol, SYMBOL_BID) - (50 * g_pip_value); }
+
+// --- LIVE DATA: Reads from cached values ---
+CompassData GetCompassData(ENUM_TIMEFRAMES tf)
+{
+    CompassData data;
+    int index = GetCacheIndex(tf);
+    if(index != -1)
+    {
+        data.bias = g_compass_cache[index].bias;
+        data.confidence = g_compass_cache[index].confidence;
+    }
+    else // Fallback if TF not in our main list
+    {
+        data.bias = BIAS_NEUTRAL;
+        data.confidence = 0.0;
+    }
+    return data;
+}
+
+ENUM_ZONE GetZoneStatus(ENUM_TIMEFRAMES tf)
+{
+    int index = GetCacheIndex(tf);
+    if(index != -1)
+    {
+        return g_supdem_cache[index].zone;
+    }
+    return ZONE_NONE;
+}
+
+double GetMagnetLevelTF(ENUM_TIMEFRAMES tf)
+{
+    int index = GetCacheIndex(tf);
+    if(index != -1)
+    {
+        return g_supdem_cache[index].magnet_level;
+    }
+    return 0.0;
+}
+
+double GetMagnetProjectionLevel() 
+{
+    // Uses the live data function for the chart's current timeframe
+    return GetMagnetLevelTF(_Period);
+}
+
+// --- LOGIC FUNCTIONS (Now use live data) ---
+ENUM_HEATMAP_STATUS GetZoneHeatmapStatus(ENUM_TIMEFRAMES tf)
+{
+    // This now uses the live zone status
+    switch(GetZoneStatus(tf))
+    {
+        case ZONE_DEMAND: return HEATMAP_DEMAND;
+        case ZONE_SUPPLY: return HEATMAP_SUPPLY;
+        default: return HEATMAP_NONE;
+    }
+}
+
+ENUM_MAGNET_RELATION GetMagnetProjectionRelation(double price, double magnet)
+{
+    if(price == 0 || magnet == 0) return RELATION_AT; // Avoid false signals on error
+    double proximity = 5 * _Point;
+    if(price > magnet + proximity) return RELATION_ABOVE;
+    if(price < magnet - proximity) return RELATION_BELOW;
+    return RELATION_AT;
+}
+
+ENUM_MAGNET_RELATION GetMagnetRelationTF(double price, double magnet) {
+   if(price == 0 || magnet == 0) return RELATION_AT; // Avoid false signals on error
+   if(price > magnet) return RELATION_ABOVE;
+   if(price < magnet) return RELATION_BELOW;
+   return RELATION_AT;
+}
+
+// --- MOCK/STATIC FUNCTIONS (Unchanged) ---
 ENUM_TRADE_SIGNAL GetTradeSignal()
 {
     long time_cycle = TimeCurrent() / 10;
@@ -144,37 +323,21 @@ ENUM_ZONE_INTERACTION GetCurrentZoneInteraction()
     long time_cycle = TimeCurrent() / 15;
     switch(time_cycle % 3) { case 0: return INTERACTION_DEMAND; case 1: return INTERACTION_SUPPLY; default: return INTERACTION_NONE; }
 }
-ENUM_HEATMAP_STATUS GetZoneHeatmapStatus(ENUM_TIMEFRAMES tf)
-{
-    long time_cycle = TimeCurrent() / (5 * (int)tf);
-    switch(time_cycle % 5) { case 0: return HEATMAP_DEMAND; case 1: return HEATMAP_SUPPLY; default: return HEATMAP_NONE; }
-}
-double GetMagnetProjectionLevel() { return iClose(_Symbol, _Period, 1) + 20 * _Point; }
-ENUM_MAGNET_RELATION GetMagnetProjectionRelation(double price, double magnet)
-{
-    double proximity = 5 * _Point;
-    if(price > magnet + proximity) return RELATION_ABOVE;
-    if(price < magnet - proximity) return RELATION_BELOW;
-    return RELATION_AT;
-}
-double GetMagnetLevelTF(ENUM_TIMEFRAMES tf) { return iClose(_Symbol, tf, 1) + (MathRand()%100-50)*_Point; }
-ENUM_MAGNET_RELATION GetMagnetRelationTF(double price, double magnet) {
-   if(price>magnet) return RELATION_ABOVE;
-   if(price<magnet) return RELATION_BELOW;
-   return RELATION_AT;
-}
 
 MatrixRowData GetConfidenceMatrixRow(ENUM_TIMEFRAMES tf)
 {
     MatrixRowData data;
     data.bias = GetCompassData(tf).bias;
     data.zone = GetZoneStatus(tf);
-    data.magnet = GetMagnetRelationTF(SymbolInfoDouble(_Symbol, SYMBOL_BID), GetMagnetLevelTF(tf));
+    double magnet_level = GetMagnetLevelTF(tf);
+    data.magnet = GetMagnetRelationTF(SymbolInfoDouble(_Symbol, SYMBOL_BID), magnet_level);
+    
     int score = 0;
     if(data.bias == BIAS_BULL && (data.zone == ZONE_DEMAND || data.magnet == RELATION_ABOVE)) score++;
     if(data.bias == BIAS_BEAR && (data.zone == ZONE_SUPPLY || data.magnet == RELATION_BELOW)) score++;
     if(data.zone == ZONE_DEMAND && data.magnet == RELATION_ABOVE) score++;
     if(data.zone == ZONE_SUPPLY && data.magnet == RELATION_BELOW) score++;
+    
     if(score >= 2) data.score = CONFIDENCE_STRONG;
     else if (score == 1) data.score = CONFIDENCE_MEDIUM;
     else data.score = CONFIDENCE_WEAK;
@@ -237,8 +400,10 @@ SessionData GetSessionData()
     else if(hour >= 21 || hour < 6) data.session_name = "Sydney";
     else if(hour >= 6 && hour < 8) data.session_name = "Tokyo";
     else data.session_name = "Inter-Session";
+    
     if(hour >= 13 && hour < 16) data.session_overlap = "NY + London";
     else data.session_overlap = "None";
+    
     int rand_val = MathRand() % 3;
     switch(rand_val)
     {
@@ -309,28 +474,6 @@ AlertData GetAlertCenterStatus()
     return alert;
 }
 
-
-CompassData GetCompassData(ENUM_TIMEFRAMES tf)
-{
-    CompassData data; data.bias = BIAS_NEUTRAL; data.confidence = 0.0;
-    double bias_buffer[1], conf_buffer[1];
-    if(CopyBuffer(iCustom(_Symbol, tf, "AlfredCompass"), 0, 0, 1, bias_buffer) > 0 &&
-       CopyBuffer(iCustom(_Symbol, tf, "AlfredCompass"), 1, 0, 1, conf_buffer) > 0)
-    {
-        if(bias_buffer[0] > 0) data.bias = BIAS_BULL; else if(bias_buffer[0] < 0) data.bias = BIAS_BEAR;
-        data.confidence = conf_buffer[0];
-    }
-    return data;
-}
-
-ENUM_ZONE GetZoneStatus(ENUM_TIMEFRAMES tf)
-{
-    string tf_str = EnumToString(tf); StringReplace(tf_str, "PERIOD_", "");
-    if(ObjectFind(0, "DZone_" + tf_str) >= 0) return ZONE_DEMAND;
-    if(ObjectFind(0, "SZone_" + tf_str) >= 0) return ZONE_SUPPLY;
-    return ZONE_NONE;
-}
-
 LiveTradeData FetchTradeLevels()
 {
     LiveTradeData data; data.trade_exists = false;
@@ -338,13 +481,15 @@ LiveTradeData FetchTradeLevels()
     {
         if(PositionGetString(POSITION_SYMBOL) == _Symbol)
         {
-            data.trade_exists = true; data.entry = PositionGetDouble(POSITION_PRICE_OPEN);
+            data.trade_exists = true;
+            data.entry = PositionGetDouble(POSITION_PRICE_OPEN);
             data.sl = PositionGetDouble(POSITION_SL); data.tp = PositionGetDouble(POSITION_TP);
             break;
         }
     }
     return data;
 }
+
 
 //+------------------------------------------------------------------+
 //|                   HELPER & CONVERSION FUNCTIONS                  |
@@ -378,7 +523,7 @@ color AlertStatusToColor(ENUM_ALERT_STATUS s) { switch(s) { case ALERT_STRONG: r
 
 
 //+------------------------------------------------------------------+
-//|                       UI DRAWING HELPERS                         |
+//|                   UI DRAWING HELPERS                         |
 //+------------------------------------------------------------------+
 void CreateLabel(string n,string t,int x,int y,color c,int fs=FONT_SIZE_NORMAL,ENUM_ANCHOR_POINT a=ANCHOR_LEFT){string o=PANE_PREFIX+n;ObjectCreate(0,o,OBJ_LABEL,0,0,0);ObjectSetString(0,o,OBJPROP_TEXT,t);ObjectSetInteger(0,o,OBJPROP_XDISTANCE,x);ObjectSetInteger(0,o,OBJPROP_YDISTANCE,y);ObjectSetInteger(0,o,OBJPROP_COLOR,c);ObjectSetInteger(0,o,OBJPROP_FONTSIZE,fs);ObjectSetString(0,o,OBJPROP_FONT,"Arial");ObjectSetInteger(0,o,OBJPROP_ANCHOR,a);ObjectSetInteger(0,o,OBJPROP_BACK,false);ObjectSetInteger(0,o,OBJPROP_CORNER,0);}
 void CreateRectangle(string n,int x,int y,int w,int h,color c,ENUM_BORDER_TYPE b=BORDER_FLAT){string o=PANE_PREFIX+n;ObjectCreate(0,o,OBJ_RECTANGLE_LABEL,0,0,0);ObjectSetInteger(0,o,OBJPROP_XDISTANCE,x);ObjectSetInteger(0,o,OBJPROP_YDISTANCE,y);ObjectSetInteger(0,o,OBJPROP_XSIZE,w);ObjectSetInteger(0,o,OBJPROP_YSIZE,h);ObjectSetInteger(0,o,OBJPROP_BGCOLOR,c);ObjectSetInteger(0,o,OBJPROP_COLOR,c);ObjectSetInteger(0,o,OBJPROP_BORDER_TYPE,b);ObjectSetInteger(0,o,OBJPROP_BACK,true);ObjectSetInteger(0,o,OBJPROP_CORNER,0);}
@@ -407,14 +552,14 @@ void CreatePanel()
     int x_col1 = x_offset;
     int x_col2 = x_offset + 120;
     int x_toggle = PANE_X_POS + PANE_WIDTH - 20;
-
     CreateLabel("symbol_header", _Symbol, x_offset, y_offset, COLOR_HEADER, 10);
     y_offset += SPACING_LARGE;
     
     // --- Upcoming News Section
     if(ShowNewsModule)
     {
-        CreateLabel("news_header", "⚠️ UPCOMING NEWS", x_col1, y_offset, COLOR_HEADER, FONT_SIZE_HEADER); y_offset += SPACING_MEDIUM;
+        CreateLabel("news_header", "⚠️ UPCOMING NEWS", x_col1, y_offset, COLOR_HEADER, FONT_SIZE_HEADER);
+        y_offset += SPACING_MEDIUM;
         for(int i = 0; i < MAX_NEWS_ITEMS; i++)
         {
             string idx = IntegerToString(i);
@@ -430,7 +575,8 @@ void CreatePanel()
     // --- Emotional State Section
     if(ShowEmotionalState)
     {
-        CreateLabel("emotion_header", "🧠 EMOTIONAL STATE", x_col1, y_offset, COLOR_HEADER, FONT_SIZE_HEADER); y_offset += SPACING_MEDIUM;
+        CreateLabel("emotion_header", "🧠 EMOTIONAL STATE", x_col1, y_offset, COLOR_HEADER, FONT_SIZE_HEADER);
+        y_offset += SPACING_MEDIUM;
         CreateLabel("emotion_indicator", "●", x_col1, y_offset, COLOR_STATE_NEUTRAL, FONT_SIZE_HEADER);
         CreateLabel("emotion_text", "---", x_col1 + 15, y_offset, COLOR_NEUTRAL_TEXT);
         y_offset += SPACING_MEDIUM;
@@ -440,7 +586,8 @@ void CreatePanel()
     // --- Alert Center Section
     if(ShowAlertCenter)
     {
-        CreateLabel("alert_header", "🚨 ALERT CENTER", x_col1, y_offset, COLOR_HEADER, FONT_SIZE_HEADER); y_offset += SPACING_MEDIUM;
+        CreateLabel("alert_header", "🚨 ALERT CENTER", x_col1, y_offset, COLOR_HEADER, FONT_SIZE_HEADER);
+        y_offset += SPACING_MEDIUM;
         CreateLabel("alert_status", "---", x_col1, y_offset, COLOR_NA, FONT_SIZE_NORMAL);
         y_offset += SPACING_MEDIUM;
         DrawSeparator("sep_alert", y_offset, x_offset);
@@ -449,7 +596,8 @@ void CreatePanel()
     // --- Pane Settings Section
     if(ShowPaneSettings)
     {
-        CreateLabel("settings_header", "⚙️ PANE SETTINGS", x_col1, y_offset, COLOR_HEADER, FONT_SIZE_HEADER); y_offset += SPACING_MEDIUM;
+        CreateLabel("settings_header", "⚙️ PANE SETTINGS", x_col1, y_offset, COLOR_HEADER, FONT_SIZE_HEADER);
+        y_offset += SPACING_MEDIUM;
         int settings_x1 = x_col1;
         int settings_x2 = x_col1 + 110;
         
@@ -464,15 +612,12 @@ void CreatePanel()
         CreateLabel("setting_heatmap_prefix", "📦 Zone Heatmap:", settings_x1, y_offset, COLOR_HEADER);
         CreateLabel("setting_heatmap_value", "---", settings_x2, y_offset, COLOR_NA);
         y_offset += SPACING_MEDIUM;
-        
         CreateLabel("setting_reco_prefix", "🎯 Trade Signals:", settings_x1, y_offset, COLOR_HEADER);
         CreateLabel("setting_reco_value", "---", settings_x2, y_offset, COLOR_NA);
         y_offset += SPACING_MEDIUM;
-        
         CreateLabel("setting_emotion_prefix", "🧠 Emotion Module:", settings_x1, y_offset, COLOR_HEADER);
         CreateLabel("setting_emotion_value", "---", settings_x2, y_offset, COLOR_NA);
         y_offset += SPACING_MEDIUM;
-        
         CreateLabel("setting_alert_prefix", "🔔 Alert Center:", settings_x1, y_offset, COLOR_HEADER);
         CreateLabel("setting_alert_value", "---", settings_x2, y_offset, COLOR_NA);
         y_offset += SPACING_MEDIUM;
@@ -498,15 +643,17 @@ void CreatePanel()
     DrawSeparator("sep1", y_offset, x_offset);
     
     // --- Zone Interaction Status Section
-    CreateLabel("zone_interaction_header", "ZONE STATUS", x_col1, y_offset, COLOR_HEADER, FONT_SIZE_HEADER); y_offset += SPACING_MEDIUM;
+    CreateLabel("zone_interaction_header", "ZONE STATUS", x_col1, y_offset, COLOR_HEADER, FONT_SIZE_HEADER);
+    y_offset += SPACING_MEDIUM;
     CreateRectangle("zone_interaction_highlight", x_col1 - 5, y_offset - 2, PANE_WIDTH - 20, 14, COLOR_HIGHLIGHT_NONE);
     CreateLabel("zone_interaction_status", "NO ZONE INTERACTION", x_col1, y_offset, COLOR_NA, FONT_SIZE_NORMAL); y_offset += SPACING_MEDIUM;
     DrawSeparator("sep_zone", y_offset, x_offset);
-
+    
     // --- Zone Heatmap Section
     if(ShowZoneHeatmap)
     {
-        CreateLabel("heatmap_header", "ZONE HEATMAP", x_col1, y_offset, COLOR_HEADER, FONT_SIZE_HEADER); y_offset += SPACING_MEDIUM;
+        CreateLabel("heatmap_header", "ZONE HEATMAP", x_col1, y_offset, COLOR_HEADER, FONT_SIZE_HEADER);
+        y_offset += SPACING_MEDIUM;
         int heatmap_x = x_col1 + 20;
         for(int i = 0; i < ArraySize(g_heatmap_tf_strings); i++)
         {
@@ -522,7 +669,8 @@ void CreatePanel()
     // --- Magnet Projection Section
     if(ShowMagnetProjection)
     {
-        CreateLabel("magnet_header", "MAGNET PROJECTION", x_col1, y_offset, COLOR_HEADER, FONT_SIZE_HEADER); y_offset += SPACING_MEDIUM;
+        CreateLabel("magnet_header", "MAGNET PROJECTION", x_col1, y_offset, COLOR_HEADER, FONT_SIZE_HEADER);
+        y_offset += SPACING_MEDIUM;
         CreateLabel("magnet_level", "Magnet → ---", x_col1, y_offset, COLOR_NEUTRAL_TEXT, FONT_SIZE_NORMAL + 1);
         CreateLabel("magnet_relation", "(---)", x_col1 + 150, y_offset, COLOR_NA, FONT_SIZE_NORMAL);
         y_offset += SPACING_MEDIUM;
@@ -532,7 +680,8 @@ void CreatePanel()
     // --- Multi-TF Magnet Summary Section
     if(ShowMultiTFMagnets)
     {
-        CreateLabel("mtf_magnet_header", "MULTI-TF MAGNETS", x_col1, y_offset, COLOR_HEADER, FONT_SIZE_HEADER); y_offset += SPACING_MEDIUM;
+        CreateLabel("mtf_magnet_header", "MULTI-TF MAGNETS", x_col1, y_offset, COLOR_HEADER, FONT_SIZE_HEADER);
+        y_offset += SPACING_MEDIUM;
         int mtf_magnet_x1 = x_col1, mtf_magnet_x2 = x_col1 + 70, mtf_magnet_x3 = x_col1 + 140;
         for(int i = 0; i < ArraySize(g_magnet_summary_tfs); i++)
         {
@@ -548,7 +697,8 @@ void CreatePanel()
     // --- Confidence Matrix Section
     if(ShowConfidenceMatrix)
     {
-        CreateLabel("matrix_header", "CONFIDENCE MATRIX", x_col1, y_offset, COLOR_HEADER, FONT_SIZE_HEADER); y_offset += SPACING_MEDIUM;
+        CreateLabel("matrix_header", "CONFIDENCE MATRIX", x_col1, y_offset, COLOR_HEADER, FONT_SIZE_HEADER);
+        y_offset += SPACING_MEDIUM;
         CreateLabel("matrix_hdr_tf", "TF", x_col1, y_offset, COLOR_HEADER);
         CreateLabel("matrix_hdr_bias", "Bias", x_col1 + 40, y_offset, COLOR_HEADER);
         CreateLabel("matrix_hdr_zone", "Zone", x_col1 + 100, y_offset, COLOR_HEADER);
@@ -570,7 +720,8 @@ void CreatePanel()
     // --- Trade Recommendation Section
     if(ShowTradeRecommendation)
     {
-        CreateLabel("reco_header", "TRADE RECOMMENDATION", x_col1, y_offset, COLOR_HEADER, FONT_SIZE_HEADER); y_offset += SPACING_MEDIUM;
+        CreateLabel("reco_header", "TRADE RECOMMENDATION", x_col1, y_offset, COLOR_HEADER, FONT_SIZE_HEADER);
+        y_offset += SPACING_MEDIUM;
         CreateLabel("reco_action_prefix", "Action:", x_col1, y_offset, COLOR_HEADER);
         CreateLabel("reco_action_value", "WAIT", x_col1 + 70, y_offset, COLOR_NO_SIGNAL);
         y_offset += SPACING_MEDIUM;
@@ -583,7 +734,8 @@ void CreatePanel()
     // --- Risk & Positioning Section
     if(ShowRiskModule)
     {
-        CreateLabel("risk_header", "RISK & POSITIONING", x_col1, y_offset, COLOR_HEADER, FONT_SIZE_HEADER); y_offset += SPACING_MEDIUM;
+        CreateLabel("risk_header", "RISK & POSITIONING", x_col1, y_offset, COLOR_HEADER, FONT_SIZE_HEADER);
+        y_offset += SPACING_MEDIUM;
         CreateLabel("risk_pct_prefix", "Risk %:", x_col1, y_offset, COLOR_HEADER, FONT_SIZE_NORMAL);
         CreateLabel("risk_pct_value", "---", x_col2, y_offset, COLOR_NEUTRAL_TEXT, FONT_SIZE_NORMAL);
         y_offset += SPACING_MEDIUM;
@@ -599,7 +751,8 @@ void CreatePanel()
     // --- Session & Volatility Section
     if(ShowSessionModule)
     {
-        CreateLabel("session_header", "SESSION & VOLATILITY", x_col1, y_offset, COLOR_HEADER, FONT_SIZE_HEADER); y_offset += SPACING_MEDIUM;
+        CreateLabel("session_header", "SESSION & VOLATILITY", x_col1, y_offset, COLOR_HEADER, FONT_SIZE_HEADER);
+        y_offset += SPACING_MEDIUM;
         CreateLabel("session_name_prefix", "Active Session:", x_col1, y_offset, COLOR_HEADER);
         CreateLabel("session_name_value", "---", x_col2, y_offset, COLOR_NEUTRAL_TEXT);
         y_offset += SPACING_MEDIUM;
@@ -624,10 +777,11 @@ void CreatePanel()
     }
     y_offset += SPACING_SEPARATOR - (g_hud_expanded ? SPACING_MEDIUM : 0);
     DrawSeparator("sep2", y_offset, x_offset);
-
+    
     // --- Final Signal Section
     CreateLabel("signal_header", "Final Signal (H1)", x_col1, y_offset, COLOR_HEADER, FONT_SIZE_HEADER); y_offset += SPACING_MEDIUM;
-    CreateLabel("signal_dir_prefix","Signal:",x_col1,y_offset,COLOR_HEADER); CreateLabel("signal_dir_value","N/A",x_col2,y_offset,COLOR_NA); y_offset+=SPACING_MEDIUM;
+    CreateLabel("signal_dir_prefix","Signal:",x_col1,y_offset,COLOR_HEADER);
+    CreateLabel("signal_dir_value","N/A",x_col2,y_offset,COLOR_NA); y_offset+=SPACING_MEDIUM;
     CreateLabel("signal_conf_prefix","Confidence:",x_col1,y_offset,COLOR_HEADER);
     CreateLabel("signal_conf_percent", "(0%)", x_col2 + CONFIDENCE_BAR_MAX_WIDTH + 5, y_offset, COLOR_NEUTRAL_TEXT);
     CreateRectangle("signal_conf_bar_bg",x_col2,y_offset,CONFIDENCE_BAR_MAX_WIDTH,10,clrGray); CreateRectangle("signal_conf_bar_fg",x_col2,y_offset,0,10,clrNONE); y_offset+=SPACING_MEDIUM;
@@ -648,9 +802,9 @@ void CreatePanel()
     CreateLabel("trade_signal_header", "TRADE SIGNAL", x_col1, y_offset, COLOR_HEADER, FONT_SIZE_HEADER);
     CreateLabel("trade_signal_status", "NO SIGNAL", x_col2, y_offset, COLOR_NO_SIGNAL, FONT_SIZE_SIGNAL);
     y_offset += SPACING_LARGE;
-
+    
     // --- Footer & Debug Info ---
-    CreateLabel("footer", "AlfredAI™ Pane · v1.0 · Built for Traders", PANE_X_POS + PANE_WIDTH - 10, y_offset, COLOR_FOOTER, FONT_SIZE_NORMAL - 1, ANCHOR_RIGHT);
+    CreateLabel("footer", "AlfredAI™ Pane · v1.1 · Built for Traders", PANE_X_POS + PANE_WIDTH - 10, y_offset, COLOR_FOOTER, FONT_SIZE_NORMAL - 1, ANCHOR_RIGHT);
     y_offset += SPACING_MEDIUM;
     if(ShowDebugInfo)
     {
@@ -662,9 +816,11 @@ void CreatePanel()
     string bg_name = PANE_PREFIX + "background";
     ObjectCreate(0, bg_name, OBJ_RECTANGLE_LABEL, 0, 0, 0);
     ObjectSetInteger(0, bg_name, OBJPROP_XDISTANCE, PANE_X_POS); ObjectSetInteger(0, bg_name, OBJPROP_YDISTANCE, PANE_Y_POS);
-    ObjectSetInteger(0, bg_name, OBJPROP_XSIZE, PANE_WIDTH); ObjectSetInteger(0, bg_name, OBJPROP_YSIZE, y_offset - PANE_Y_POS);
+    ObjectSetInteger(0, bg_name, OBJPROP_XSIZE, PANE_WIDTH);
+    ObjectSetInteger(0, bg_name, OBJPROP_YSIZE, y_offset - PANE_Y_POS);
     ObjectSetInteger(0, bg_name, OBJPROP_BACK, true); ObjectSetInteger(0, bg_name, OBJPROP_BORDER_TYPE, BORDER_FLAT);
-    ObjectSetInteger(0, bg_name, OBJPROP_COLOR, clrNONE); color bg_color_opacity = (color)ColorToARGB(PANE_BG_COLOR, PANE_BG_OPACITY);
+    ObjectSetInteger(0, bg_name, OBJPROP_COLOR, clrNONE);
+    color bg_color_opacity = (color)ColorToARGB(PANE_BG_COLOR, PANE_BG_OPACITY);
     ObjectSetInteger(0, bg_name, OBJPROP_BGCOLOR, bg_color_opacity);
 }
 
@@ -691,7 +847,8 @@ void UpdatePanel()
             }
             else
             {
-                UpdateLabel("news_time_"+idx, ""); UpdateLabel("news_curr_"+idx, "");
+                UpdateLabel("news_time_"+idx, "");
+                UpdateLabel("news_curr_"+idx, "");
                 UpdateLabel("news_event_"+idx, ""); UpdateLabel("news_impact_"+idx, "");
             }
         }
@@ -715,9 +872,9 @@ void UpdatePanel()
     // --- Update Pane Settings
     if(ShowPaneSettings)
     {
-        string on = "✅"; string off = "❌";
+        string on = "✅";
+        string off = "❌";
         color on_c = COLOR_BULL; color off_c = COLOR_NO_SIGNAL;
-        
         UpdateLabel("setting_matrix_value", ShowConfidenceMatrix ? on : off, ShowConfidenceMatrix ? on_c : off_c);
         UpdateLabel("setting_magnet_value", ShowMultiTFMagnets ? on : off, ShowMultiTFMagnets ? on_c : off_c);
         UpdateLabel("setting_heatmap_value", ShowZoneHeatmap ? on : off, ShowZoneHeatmap ? on_c : off_c);
@@ -731,7 +888,8 @@ void UpdatePanel()
     {
         for(int i=0; i<ArraySize(g_timeframes); i++)
         {
-             string tf_str = g_timeframe_strings[i]; ENUM_TIMEFRAMES tf_enum = g_timeframes[i];
+             string tf_str = g_timeframe_strings[i];
+             ENUM_TIMEFRAMES tf_enum = g_timeframes[i];
              CompassData compass = GetCompassData(tf_enum); UpdateLabel("biases_"+tf_str+"_value", BiasToString(compass.bias), BiasToColor(compass.bias));
              ENUM_ZONE zone = GetZoneStatus(tf_enum); UpdateLabel("zone_"+tf_str+"_value", ZoneToString(zone), ZoneToColor(zone));
         }
@@ -742,7 +900,7 @@ void UpdatePanel()
     UpdateLabel("zone_interaction_status", ZoneInteractionToString(interaction), ZoneInteractionToColor(interaction));
     string highlight_obj = PANE_PREFIX + "zone_interaction_highlight";
     ObjectSetInteger(0, highlight_obj, OBJPROP_BGCOLOR, ZoneInteractionToHighlightColor(interaction));
-
+    
     // --- Update Zone Heatmap
     if(ShowZoneHeatmap)
     {
@@ -763,7 +921,8 @@ void UpdatePanel()
         ENUM_MAGNET_RELATION relation = GetMagnetProjectionRelation(current_price, magnet_level);
         
         string price_format = "%." + IntegerToString(_Digits) + "f";
-        UpdateLabel("magnet_level", "Magnet → " + StringFormat(price_format, magnet_level), COLOR_NEUTRAL_TEXT);
+        string level_text = (magnet_level == 0.0) ? "---" : StringFormat(price_format, magnet_level);
+        UpdateLabel("magnet_level", "Magnet → " + level_text, COLOR_NEUTRAL_TEXT);
         UpdateLabel("magnet_relation", MagnetRelationToString(relation), MagnetRelationToColor(relation));
     }
     
@@ -783,9 +942,10 @@ void UpdatePanel()
             if(tf == PERIOD_M15) { relation_color = COLOR_TEXT_DIM; }
             
             string price_format = "(%." + IntegerToString(_Digits) + "f)";
-            
+            string level_text = (magnet_level == 0.0) ? "(N/A)" : StringFormat(price_format, magnet_level);
+
             UpdateLabel("mtf_magnet_relation_"+tf_str, MagnetRelationTFToString(relation), relation_color);
-            UpdateLabel("mtf_magnet_level_"+tf_str, StringFormat(price_format, magnet_level), relation_color);
+            UpdateLabel("mtf_magnet_level_"+tf_str, level_text, relation_color);
         }
     }
     
@@ -842,7 +1002,6 @@ void UpdatePanel()
         UpdateLabel("session_vol_value", VolatilityToString(s_data.volatility), VolatilityToColor(s_data.volatility));
         string vol_obj = PANE_PREFIX + "session_vol_value";
         ObjectSetString(0, vol_obj, OBJPROP_FONT, "Arial Bold");
-        
         string vol_bg_obj = PANE_PREFIX + "session_vol_bg";
         ObjectSetInteger(0, vol_bg_obj, OBJPROP_BGCOLOR, VolatilityToHighlightColor(s_data.volatility));
     }
@@ -851,7 +1010,8 @@ void UpdatePanel()
     // --- Update HUD Metrics
     if(g_hud_expanded)
     {
-        long spread_points = SymbolInfoInteger(_Symbol, SYMBOL_SPREAD); UpdateLabel("hud_spread_val", IntegerToString(spread_points) + " pts", COLOR_NEUTRAL_TEXT);
+        long spread_points = SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
+        UpdateLabel("hud_spread_val", IntegerToString(spread_points) + " pts", COLOR_NEUTRAL_TEXT);
         double atr_buffer[1]; if(CopyBuffer(hATR_current, 0, 0, 1, atr_buffer) > 0) { UpdateLabel("hud_atr_val", DoubleToString(atr_buffer[0], _Digits), COLOR_NEUTRAL_TEXT); }
     }
     
@@ -867,9 +1027,10 @@ void UpdatePanel()
     UpdateLabel("signal_conf_percent", StringFormat("(%.0f%%)", adjusted_conf), conf_color);
     int bar_width = (int)(adjusted_conf / 100.0 * CONFIDENCE_BAR_MAX_WIDTH);
     string bar_name = PANE_PREFIX + "signal_conf_bar_fg";
-    ObjectSetInteger(0, bar_name, OBJPROP_XSIZE, bar_width); ObjectSetInteger(0, bar_name, OBJPROP_BGCOLOR, conf_color); ObjectSetInteger(0, bar_name, OBJPROP_COLOR, conf_color);
+    ObjectSetInteger(0, bar_name, OBJPROP_XSIZE, bar_width);
+    ObjectSetInteger(0, bar_name, OBJPROP_BGCOLOR, conf_color); ObjectSetInteger(0, bar_name, OBJPROP_COLOR, conf_color);
     ENUM_ZONE h1_zone = GetZoneStatus(PERIOD_H1); UpdateLabel("magnet_zone_value", ZoneToString(h1_zone), ZoneToColor(h1_zone));
-
+    
     // --- Update Trade Data & TP/SL
     LiveTradeData trade_data = FetchTradeLevels();
     string price_format = "%." + IntegerToString(_Digits) + "f";
@@ -887,7 +1048,8 @@ void UpdatePanel()
     }
     else
     {
-        UpdateLabel("trade_entry_value", "---", COLOR_NEUTRAL_TEXT); UpdateLabel("trade_sl_value", "---", COLOR_NEUTRAL_TEXT);
+        UpdateLabel("trade_entry_value", "---", COLOR_NEUTRAL_TEXT);
+        UpdateLabel("trade_sl_value", "---", COLOR_NEUTRAL_TEXT);
         UpdateLabel("trade_tp_value", "---", COLOR_NEUTRAL_TEXT); UpdateLabel("trade_status_value", "☐ No Trade", COLOR_NEUTRAL_TEXT);
         double mock_tp = GetCurrentTP(); double mock_sl = GetCurrentSL();
         DrawOrUpdatePriceLine("tp", mock_tp, COLOR_BULL);
@@ -946,15 +1108,29 @@ int OnInit()
     g_pip_value = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
     if(SymbolInfoInteger(_Symbol, SYMBOL_DIGITS) == 3 || SymbolInfoInteger(_Symbol, SYMBOL_DIGITS) == 5) { g_pip_value *= 10; }
     MathSrand((int)TimeCurrent()); // Seed random generator
+    
+    // Initialize caches with default values
+    for(int i = 0; i < ArraySize(g_timeframes); i++)
+    {
+       g_compass_cache[i].bias = BIAS_NEUTRAL;
+       g_compass_cache[i].confidence = 0.0;
+       g_supdem_cache[i].zone = ZONE_NONE;
+       g_supdem_cache[i].magnet_level = 0.0;
+    }
+
     RedrawPanel();
-    EventSetTimer(1);
+    EventSetTimer(1); // Set timer to 1-second intervals
     return(INIT_SUCCEEDED);
 }
 
 //+------------------------------------------------------------------+
 //| Timer function to trigger updates                                |
 //+------------------------------------------------------------------+
-void OnTimer(){UpdatePanel();}
+void OnTimer()
+{
+    UpdateLiveDataCaches(); // Fetch fresh data from indicators
+    UpdatePanel();          // Update the display with cached data
+}
 
 //+------------------------------------------------------------------+
 //| Custom indicator iteration function (not used for timer updates) |
