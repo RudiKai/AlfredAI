@@ -1,6 +1,6 @@
 //+------------------------------------------------------------------+
 //|                        AlfredAI_Pane.mq5                         |
-//|             v1.7 - Integrated HUD Zone Activity                  |
+//|             v1.8.3 - Zone Heatmap FIX                            |
 //|                                                                  |
 //| Copyright 2024, RudiKai                                          |
 //|                     https://github.com/RudiKai                   |
@@ -8,7 +8,7 @@
 #property strict
 #property indicator_chart_window
 #property indicator_plots 0 // Suppress "no indicator plot" warning
-#property version "1.8" // UPGRADED: Version reflects new SupDemCore integration
+#property version "1.8.3" // UPGRADED: Version reflects Zone Heatmap fix
 
 // --- Optional Inputs ---
 input bool ShowDebugInfo = false; // Toggle for displaying debug information
@@ -135,10 +135,11 @@ bool g_hud_expanded = true;
 double g_pip_value;
 string g_timeframe_strings[] = {"M1", "M5", "M15", "M30", "H1", "H4", "D1"};
 ENUM_TIMEFRAMES g_timeframes[] = {PERIOD_M1, PERIOD_M5, PERIOD_M15, PERIOD_M30, PERIOD_H1, PERIOD_H4, PERIOD_D1};
-string g_heatmap_tf_strings[] = {"M15", "H1", "H4", "D1"};
-ENUM_TIMEFRAMES g_heatmap_tfs[] = {PERIOD_M15, PERIOD_H1, PERIOD_H4, PERIOD_D1};
-string g_magnet_summary_tf_strings[] = {"M15", "H1", "H4", "D1"};
-ENUM_TIMEFRAMES g_magnet_summary_tfs[] = {PERIOD_M15, PERIOD_H1, PERIOD_H4, PERIOD_D1};
+// UPDATED: Expanded heatmap TFs
+string g_heatmap_tf_strings[] = {"M15", "M30", "H1", "H2", "H4", "D1"};
+ENUM_TIMEFRAMES g_heatmap_tfs[] = {PERIOD_M15, PERIOD_M30, PERIOD_H1, PERIOD_H2, PERIOD_H4, PERIOD_D1};
+string g_magnet_summary_tf_strings[] = {"M15", "M30", "H1", "H2", "H4", "D1"};
+ENUM_TIMEFRAMES g_magnet_summary_tfs[] = {PERIOD_M15, PERIOD_M30, PERIOD_H1, PERIOD_H2, PERIOD_H4, PERIOD_D1};
 string g_matrix_tf_strings[] = {"M15", "H1", "H4", "D1"};
 ENUM_TIMEFRAMES g_matrix_tfs[] = {PERIOD_M15, PERIOD_H1, PERIOD_H4, PERIOD_D1};
 string g_hud_tf_strings[] = {"M15", "H1", "H4", "D1"};
@@ -1031,6 +1032,47 @@ color AlertStatusToColor(ENUM_ALERT_STATUS s)
    return COLOR_ALERT_NONE;
 }
 
+// --- HELPERS FOR TF BIASES & ZONES ---
+string GetBiasLabelFromZone(int zone_val)
+{
+   if (zone_val == 1) return "Bull";
+   if (zone_val == -1) return "Bear";
+   return "Neutral";
+}
+
+color GetBiasColorFromZone(int zone_val)
+{
+   if (zone_val == 1) return COLOR_BULL;
+   if (zone_val == -1) return COLOR_BEAR;
+   return COLOR_NEUTRAL_BIAS;
+}
+
+string GetMagnetRelationLabel(double current_price, double magnet_level)
+{
+    if (magnet_level == 0.0) return "N/A"; // No magnet found
+    double proximity = 5 * _Point; // Proximity threshold in points
+    if (current_price > magnet_level + proximity) return "Above";
+    if (current_price < magnet_level - proximity) return "Below";
+    return "At";
+}
+
+color GetMagnetRelationColor(string relation)
+{
+    if (relation == "Above") return COLOR_BULL;
+    if (relation == "Below") return COLOR_BEAR;
+    if (relation == "At") return COLOR_MAGNET_AT;
+    return COLOR_NA; // For "N/A"
+}
+
+// --- NEW HELPER FOR ZONE HEATMAP ---
+color GetHeatColorForStrength(int strength)
+{
+   if(strength >= 8) return clrRed;
+   if(strength >= 5) return clrOrange;
+   if(strength >= 1) return clrGold;
+   return clrSilver;
+}
+
 
 //+------------------------------------------------------------------+
 //|                         UI DRAWING HELPERS                       |
@@ -1164,24 +1206,37 @@ void CreatePanel()
       DrawSeparator("sep_settings", y_offset, x_offset);
    }
 
-   // --- TF Biases Section
+   // --- TF Biases Section ---
    CreateLabel("biases_header", "TF Biases & Zones", x_col1, y_offset, COLOR_HEADER, FONT_SIZE_HEADER);
    CreateLabel("biases_toggle", g_biases_expanded ? "[-]" : "[+]", x_toggle, y_offset, COLOR_TOGGLE, FONT_SIZE_HEADER);
    y_offset += SPACING_MEDIUM;
    if(g_biases_expanded)
    {
-      for(int i = 0; i < ArraySize(g_timeframe_strings); i++)
+      // Timeframes for this specific module
+      string tf_bias_strings[] = {"M15", "M30", "H1", "H2", "H4", "D1"};
+
+      // Column positions
+      int x_col_tf = x_col1;
+      int x_col_bias = x_col1 + 40;
+      int x_col_zone = x_col1 + 95;
+      int x_col_magnet = x_col1 + 160;
+
+      for(int i = 0; i < ArraySize(tf_bias_strings); i++)
       {
-         string tf = g_timeframe_strings[i];
-         CreateLabel("biases_" + tf + "_prefix", tf + ":", x_col1, y_offset, COLOR_HEADER);
-         CreateLabel("biases_" + tf + "_value", "N/A", x_col1 + 30, y_offset, COLOR_NA);
-         CreateLabel("zone_" + tf + "_prefix", "Zone:", x_col2, y_offset, COLOR_HEADER);
-         CreateLabel("zone_" + tf + "_value", "N/A", x_col2 + 35, y_offset, COLOR_NA);
+         string tf = tf_bias_strings[i];
+         CreateLabel("biases_" + tf + "_prefix", tf + ":", x_col_tf, y_offset, COLOR_HEADER);
+         // Bias Label
+         CreateLabel("biases_" + tf + "_value", "---", x_col_bias, y_offset, COLOR_NA);
+         // Zone Label
+         CreateLabel("zone_" + tf + "_value", "---", x_col_zone, y_offset, COLOR_NA);
+         // Magnet Label
+         CreateLabel("magnet_" + tf + "_value", "---", x_col_magnet, y_offset, COLOR_NA);
          y_offset += SPACING_MEDIUM;
       }
    }
    y_offset += SPACING_SEPARATOR - (g_biases_expanded ? SPACING_MEDIUM : 0);
    DrawSeparator("sep1", y_offset, x_offset);
+
 
    // --- MODIFIED: Zone Interaction Status Section with Quality Details ---
    CreateLabel("zone_interaction_header", "ZONE STATUS", x_col1, y_offset, COLOR_HEADER, FONT_SIZE_HEADER);
@@ -1207,18 +1262,18 @@ void CreatePanel()
    y_offset += SPACING_MEDIUM;
    DrawSeparator("sep_zone", y_offset, x_offset);
 
-   // --- Zone Heatmap Section
+   // --- Zone Heatmap Section (FIXED Layout) ---
    if(ShowZoneHeatmap)
    {
       CreateLabel("heatmap_header", "ZONE HEATMAP", x_col1, y_offset, COLOR_HEADER, FONT_SIZE_HEADER);
       y_offset += SPACING_MEDIUM;
-      int heatmap_x = x_col1 + 20;
+      int heatmap_x = x_col1 + 10; // Adjusted starting position
       for(int i = 0; i < ArraySize(g_heatmap_tf_strings); i++)
       {
          string tf = g_heatmap_tf_strings[i];
          CreateLabel("heatmap_tf_" + tf, tf, heatmap_x, y_offset, COLOR_HEADER, FONT_SIZE_NORMAL, ANCHOR_CENTER);
          CreateLabel("heatmap_status_" + tf, "-", heatmap_x, y_offset + 12, COLOR_NA, FONT_SIZE_NORMAL, ANCHOR_CENTER);
-         heatmap_x += 45;
+         heatmap_x += 35; // Adjusted spacing for 6 TFs
       }
       y_offset += SPACING_LARGE;
       DrawSeparator("sep_heatmap", y_offset, x_offset);
@@ -1396,7 +1451,7 @@ void CreatePanel()
    CreateLabel("trade_signal_status", "NO SIGNAL", x_col2, y_offset, COLOR_NO_SIGNAL, FONT_SIZE_SIGNAL);
    y_offset += SPACING_LARGE;
    // --- Footer & Debug Info ---
-   CreateLabel("footer", "AlfredAI™ Pane · v1.8 · Built for Traders", PANE_X_POS + PANE_WIDTH - 10, y_offset, COLOR_FOOTER, FONT_SIZE_NORMAL - 1, ANCHOR_RIGHT);
+   CreateLabel("footer", "AlfredAI™ Pane · v1.8.3 · Built for Traders", PANE_X_POS + PANE_WIDTH - 10, y_offset, COLOR_FOOTER, FONT_SIZE_NORMAL - 1, ANCHOR_RIGHT);
    y_offset += SPACING_MEDIUM;
    if(ShowDebugInfo)
    {
@@ -1483,19 +1538,42 @@ void UpdatePanel()
       UpdateLabel("setting_alert_value", ShowAlertCenter ? on : off, ShowAlertCenter ? on_c : off_c);
    }
 
-   // --- Update TF Biases
+   // --- Update TF Biases & Zones ---
    if(g_biases_expanded)
    {
-      for(int i = 0; i < ArraySize(g_timeframes); i++)
+      // Timeframes for this specific module
+      string tf_bias_strings[] = {"M15", "M30", "H1", "H2", "H4", "D1"};
+      ENUM_TIMEFRAMES tf_bias_enums[] = {PERIOD_M15, PERIOD_M30, PERIOD_H1, PERIOD_H2, PERIOD_H4, PERIOD_D1};
+      double current_price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+
+      for(int i = 0; i < ArraySize(tf_bias_strings); i++)
       {
-         string tf_str = g_timeframe_strings[i];
-         ENUM_TIMEFRAMES tf_enum = g_timeframes[i];
-         CompassData compass = GetCompassData(tf_enum);
-         UpdateLabel("biases_" + tf_str + "_value", BiasToString(compass.bias), BiasToColor(compass.bias));
-         ENUM_ZONE zone = GetZoneStatus(tf_enum);
-         UpdateLabel("zone_" + tf_str + "_value", ZoneToString(zone), ZoneToColor(zone));
+         string tf_str = tf_bias_strings[i];
+         ENUM_TIMEFRAMES tf_enum = tf_bias_enums[i];
+
+         // Fetch data directly using iCustom for this specific module
+         double raw_zone_val = iCustom(_Symbol, tf_enum, "AlfredSupDemCore.ex5", 0, 0);
+         double magnet_level = iCustom(_Symbol, tf_enum, "AlfredSupDemCore.ex5", 1, 0);
+
+         int zone_val = 0; // 1=Demand, -1=Supply, 0=None
+         if(raw_zone_val > 0.5) zone_val = 1;
+         else if(raw_zone_val < -0.5) zone_val = -1;
+
+         // --- Update Bias ---
+         UpdateLabel("biases_" + tf_str + "_value", GetBiasLabelFromZone(zone_val), GetBiasColorFromZone(zone_val));
+
+         // --- Update Zone ---
+         ENUM_ZONE zone_enum = ZONE_NONE;
+         if(zone_val == 1) zone_enum = ZONE_DEMAND;
+         else if(zone_val == -1) zone_enum = ZONE_SUPPLY;
+         UpdateLabel("zone_" + tf_str + "_value", ZoneToString(zone_enum), ZoneToColor(zone_enum));
+
+         // --- Update Magnet ---
+         string magnet_text = GetMagnetRelationLabel(current_price, magnet_level);
+         UpdateLabel("magnet_" + tf_str + "_value", magnet_text, GetMagnetRelationColor(magnet_text));
       }
    }
+
 
    // --- MODIFIED: Update Zone Interaction Status and Quality Details ---
    ENUM_ZONE_INTERACTION interaction = GetCurrentZoneInteraction();
@@ -1539,7 +1617,7 @@ void UpdatePanel()
    }
 
 
-   // --- MODIFIED: Update Zone Heatmap with dynamic colors ---
+   // --- Update Zone Heatmap (FIXED) ---
    if(ShowZoneHeatmap)
    {
       for(int i = 0; i < ArraySize(g_heatmap_tfs); i++)
@@ -1547,34 +1625,17 @@ void UpdatePanel()
          ENUM_TIMEFRAMES tf = g_heatmap_tfs[i];
          string tf_str = g_heatmap_tf_strings[i];
 
-         CachedSupDemData data = GetSupDemData(tf);
-         ENUM_HEATMAP_STATUS status = (data.zone == ZONE_DEMAND) ? HEATMAP_DEMAND : (data.zone == ZONE_SUPPLY) ? HEATMAP_SUPPLY : HEATMAP_NONE;
+         // Fetch live strength score from SupDemCore
+         double strength_score_raw = iCustom(_Symbol, tf, "AlfredSupDemCore.ex5", 2, 0);
+         int strength_score = (int)MathRound(strength_score_raw);
 
-         color heatmap_color = COLOR_NA;
-         if(status != HEATMAP_NONE)
-         {
-            bool is_demand = (status == HEATMAP_DEMAND);
-            bool has_liq = (data.liquidity > 0.5);
-            double strength = data.strength;
-
-            if(has_liq)
-            {
-               heatmap_color = is_demand ? clrLime : clrRed; // Strongest colors for liquidity grab
-            }
-            else if(strength >= 7)
-            {
-               heatmap_color = is_demand ? COLOR_DEMAND : COLOR_SUPPLY; // Default strong (LimeGreen / OrangeRed)
-            }
-            else if(strength >= 4)
-            {
-               heatmap_color = is_demand ? clrGreen : clrDarkOrange; // Medium
-            }
-            else
-            {
-               heatmap_color = is_demand ? clrDarkGreen : clrMaroon; // Weak
-            }
-         }
-         UpdateLabel("heatmap_status_" + tf_str, HeatmapStatusToString(status), heatmap_color);
+         string heatmap_text;
+         if(strength_score >= 8) heatmap_text = "🔥 " + IntegerToString(strength_score);
+         else if(strength_score >= 5) heatmap_text = "🟧 " + IntegerToString(strength_score);
+         else if(strength_score >= 1) heatmap_text = "🟨 " + IntegerToString(strength_score);
+         else heatmap_text = "⚪ " + IntegerToString(strength_score);
+         
+         UpdateLabel("heatmap_status_" + tf_str, heatmap_text, GetHeatColorForStrength(strength_score));
       }
    }
 
@@ -1591,28 +1652,51 @@ void UpdatePanel()
       UpdateLabel("magnet_relation", MagnetRelationToString(relation), MagnetRelationToColor(relation));
    }
 
-   // --- Update Multi-TF Magnet Summary
+   // --- Update Multi-TF Magnet Summary ---
    if(ShowMultiTFMagnets)
    {
       double current_price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+      double proximity = 2 * _Point; // Proximity threshold in points
+
       for(int i = 0; i < ArraySize(g_magnet_summary_tfs); i++)
       {
          ENUM_TIMEFRAMES tf = g_magnet_summary_tfs[i];
          string tf_str = g_magnet_summary_tf_strings[i];
 
-         double magnet_level = GetMagnetLevelTF(tf);
-         ENUM_MAGNET_RELATION relation = GetMagnetRelationTF(current_price, magnet_level);
+         // Fetch live magnet level from SupDemCore
+         double magnet_level = iCustom(_Symbol, tf, "AlfredSupDemCore.ex5", 1, 0);
 
-         color relation_color = MagnetRelationTFToColor(relation);
-         if(tf == PERIOD_M15)
+         string relation_text;
+         color relation_color;
+
+         if(magnet_level > 0.0)
          {
-            relation_color = COLOR_TEXT_DIM;
+            if (current_price > magnet_level + proximity)
+            {
+               relation_text = "Above";
+               relation_color = clrOrangeRed; // Soft Red
+            }
+            else if (current_price < magnet_level - proximity)
+            {
+               relation_text = "Below";
+               relation_color = clrLimeGreen; // Soft Green
+            }
+            else
+            {
+               relation_text = "At Magnet";
+               relation_color = clrGray; // Neutral Gray
+            }
          }
-
+         else
+         {
+             relation_text = "N/A";
+             relation_color = COLOR_NA;
+         }
+         
          string price_format = "(%." + IntegerToString(_Digits) + "f)";
          string level_text = (magnet_level == 0.0) ? "(N/A)" : StringFormat(price_format, magnet_level);
 
-         UpdateLabel("mtf_magnet_relation_" + tf_str, MagnetRelationTFToString(relation), relation_color);
+         UpdateLabel("mtf_magnet_relation_" + tf_str, relation_text, relation_color);
          UpdateLabel("mtf_magnet_level_" + tf_str, level_text, relation_color);
       }
    }
