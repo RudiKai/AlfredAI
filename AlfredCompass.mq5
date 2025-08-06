@@ -1,18 +1,22 @@
 //+------------------------------------------------------------------+
 //|                           AlfredCompass™                         |
-//|                            v1.11 (Buffers with Debug)            |
-//| (MODIFIED: Added debug print for live buffer output)             |
+//|                 v1.14 (Visual Toggle Added)                      |
+//| (ADDED: Input to show/hide on-chart visuals)                     |
 //+------------------------------------------------------------------+
 #property indicator_chart_window
 #property strict
 
-// CORRECTED: Two buffers for stable Bias and Confidence output
+// --- NEW INPUT ---
+input bool ShowOnChartVisuals = false; // Toggle for the on-chart arrow and text
+
+// Two buffers for stable Bias and Confidence output
 #property indicator_buffers 2
 #property indicator_plots   2
 
 #property indicator_type1   DRAW_NONE
 #property indicator_label1  "Bias"
 double BiasBuffer[];
+
 #property indicator_type2   DRAW_NONE
 #property indicator_label2  "Confidence"
 double ConfidenceBuffer[];
@@ -27,7 +31,8 @@ enum ENUM_BIAS
     BIAS_BEAR,
     BIAS_NEUTRAL
 };
-// --- Globals for Smoothing Logic ---
+
+// --- Globals for Smoothing Logic (Preserved but bypassed for output) ---
 SAlfred Alfred;
 ENUM_BIAS g_confirmedBias = BIAS_NEUTRAL;
 int       g_confirmedConfidence = 50;
@@ -35,11 +40,11 @@ bool      g_confirmedConflict = false;
 ENUM_BIAS g_pendingBias = BIAS_NEUTRAL;
 int       g_confirmationCount = 0;
 datetime  g_lastBarTime = 0;
+
 // reference timeframes
 ENUM_TIMEFRAMES TFList[] = { PERIOD_M15, PERIOD_H1, PERIOD_H4 };
 
 //+------------------------------------------------------------------+
-//|
 //| Initialization                                                   |
 //+------------------------------------------------------------------+
 int OnInit()
@@ -52,19 +57,28 @@ int OnInit()
 
    // Setup indicator buffers
    SetIndexBuffer(0, BiasBuffer, INDICATOR_DATA);
-   ArrayInitialize(BiasBuffer, 0);
    PlotIndexSetInteger(0, PLOT_DRAW_BEGIN, 1);
+   ArrayInitialize(BiasBuffer, 0.0);
 
    SetIndexBuffer(1, ConfidenceBuffer, INDICATOR_DATA);
-   ArrayInitialize(ConfidenceBuffer, 0);
    PlotIndexSetInteger(1, PLOT_DRAW_BEGIN, 1);
+   ArrayInitialize(ConfidenceBuffer, 0.0);
 
    return(INIT_SUCCEEDED);
 }
 
 //+------------------------------------------------------------------+
-//|
-//| Main iteration with Smoothing Logic                              |
+//| Deinitialization                                                 |
+//+------------------------------------------------------------------+
+void OnDeinit(const int reason)
+{
+    // Clean up all objects created by this indicator
+    ObjectsDeleteAll(0, "Compass");
+}
+
+
+//+------------------------------------------------------------------+
+//| Main iteration with revised logic                                |
 //+------------------------------------------------------------------+
 int OnCalculate(const int rates_total,
                 const int prev_calculated,
@@ -79,95 +93,97 @@ int OnCalculate(const int rates_total,
 {
    if(!Alfred.enableCompass)
       return(rates_total);
-// --- Run logic only on a new bar ---
-   if(time[rates_total-1] != g_lastBarTime)
-   {
-      g_lastBarTime = time[rates_total-1];
-// 1. Get RAW (unstable) bias from original logic
-      string rawArrow, rawBiasText;
-      bool rawConflict = false;
-      int rawConfidence = GetRawCompassBias(rawConflict, rawBiasText);
-      ENUM_BIAS rawBiasEnum = TextToBias(rawBiasText);
-// 2. Compare with pending bias and count confirmations
-      if(rawBiasEnum == g_pendingBias)
-      {
-         g_confirmationCount++;
-      }
-      else
-      {
-         g_pendingBias = rawBiasEnum;
-         g_confirmationCount = 1;
-      }
+      
+   int bar = rates_total - 1;
+   if(bar < 1) return(rates_total);
 
-      // 3. If 3 bars agree, confirm the bias for display
+   // --- 1. Get RAW (unstable) bias on every run ---
+   string rawBiasText;
+   bool rawConflict = false;
+   int rawConfidence = GetRawCompassBias(rawConflict, rawBiasText);
+   ENUM_BIAS rawBiasEnum = TextToBias(rawBiasText);
+
+   // --- 2. Populate buffers with RAW data immediately ---
+   double biasValue = 0.0;
+   if(rawBiasEnum == BIAS_BULL) biasValue = 1.0;
+   else if(rawBiasEnum == BIAS_BEAR) biasValue = -1.0;
+   
+   double confidenceValue = (double)rawConfidence;
+   
+   BiasBuffer[bar] = biasValue;
+   ConfidenceBuffer[bar] = confidenceValue;
+   
+   BiasBuffer[bar-1] = biasValue;
+   ConfidenceBuffer[bar-1] = confidenceValue;
+
+   // --- 3. Update visuals with the same RAW data (if enabled) ---
+   if(ShowOnChartVisuals)
+   {
+      UpdateChartVisuals(time[bar], high[bar], rawBiasEnum, rawConfidence, rawConflict);
+   }
+   else
+   {
+      // If visuals are disabled, make sure to clean them up once
+      ObjectsDeleteAll(0, "Compass");
+   }
+
+
+   // --- 4. Original smoothing logic (preserved but unused for output) ---
+   if(time[bar] != g_lastBarTime)
+   {
+      g_lastBarTime = time[bar];
+      if(rawBiasEnum == g_pendingBias) g_confirmationCount++;
+      else { g_pendingBias = rawBiasEnum; g_confirmationCount = 1; }
       if(g_confirmationCount >= 3)
       {
          g_confirmedBias = g_pendingBias;
-         g_confirmedConfidence = rawConfidence; // Use the latest confidence
+         g_confirmedConfidence = rawConfidence;
          g_confirmedConflict = rawConflict;
       }
    }
-
-   // 4. Update visuals using the STABLE confirmed values
-   UpdateChartVisuals();
-   
-   // 5. Set buffer values for other indicators (like the Pane) to read
-   double biasValue = (g_confirmedBias == BIAS_BULL) ? 1.0 : (g_confirmedBias == BIAS_BEAR) ? -1.0 : 0.0;
-   double confidenceValue = (double)g_confirmedConfidence;
-   
-   BiasBuffer[rates_total-1] = biasValue;
-   ConfidenceBuffer[rates_total-1] = confidenceValue;
-
-   // --- MODIFICATION: Added Debug Print Line ---
-   PrintFormat("Compass ➜ Bias: %.0f  |  Confidence: %.2f", biasValue, confidenceValue);
-   // --- END MODIFICATION ---
 
    return(rates_total);
 }
 
 //+------------------------------------------------------------------+
-//|
-//| Updates all chart objects based on confirmed state               |
+//| Updates all chart objects (REVISED to accept parameters)         |
 //+------------------------------------------------------------------+
-void UpdateChartVisuals()
+void UpdateChartVisuals(datetime barTime, double barHigh, ENUM_BIAS bias, int confidence, bool conflict)
 {
-    // Convert confirmed enum back to text for display
-    string confirmedArrow, confirmedBiasText;
-    BiasToText(g_confirmedBias, confirmedArrow, confirmedBiasText);
+    string arrow, biasText;
+    BiasToText(bias, arrow, biasText);
 
-    // Color by strength/conflict
-    string strengthLbl = WeightToLabel(g_confirmedConfidence / 5);
-    color fontColor = StrengthColor(strengthLbl);
-    if(g_confirmedConflict) fontColor = clrRed;
+    color fontColor = StrengthColor(WeightToLabel(confidence / 5));
+    if(conflict) fontColor = clrRed;
 
-    // Time/price anchors
-    datetime t = iTime(_Symbol, _Period, 0);
-    double price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+    double price_anchor = barHigh;
 
-    // --- Draw Arrow ---
     string arrowObj = "CompassArrowObj";
-    if(ObjectFind(0, arrowObj) < 0) ObjectCreate(0, arrowObj, OBJ_TEXT, 0, t, price);
+    if(ObjectFind(0, arrowObj) < 0) ObjectCreate(0, arrowObj, OBJ_TEXT, 0, 0, 0);
     ObjectSetInteger(0, arrowObj, OBJPROP_FONTSIZE, 18);
     ObjectSetInteger(0, arrowObj, OBJPROP_COLOR, fontColor);
-    ObjectSetString(0, arrowObj, OBJPROP_TEXT, confirmedArrow);
-    ObjectMove(0, arrowObj, 0, t, price + Alfred.compassYOffset * _Point);
-    // --- Draw Label ---
+    ObjectSetString(0, arrowObj, OBJPROP_TEXT, arrow);
+    ObjectSetInteger(0, arrowObj, OBJPROP_ANCHOR, ANCHOR_LOWER);
+    ObjectMove(0, arrowObj, 0, barTime, price_anchor + Alfred.compassYOffset * _Point);
+
     string labelObj = "CompassLabelObj";
-    string labelTxt = confirmedBiasText + " (" + IntegerToString(g_confirmedConfidence) + "%)";
-    if(ObjectFind(0, labelObj) < 0) ObjectCreate(0, labelObj, OBJ_TEXT, 0, t, price);
+    string labelTxt = biasText + " (" + IntegerToString(confidence) + "%)";
+    if(ObjectFind(0, labelObj) < 0) ObjectCreate(0, labelObj, OBJ_TEXT, 0, 0, 0);
     ObjectSetInteger(0, labelObj, OBJPROP_FONTSIZE, Alfred.fontSize);
     ObjectSetInteger(0, labelObj, OBJPROP_COLOR, fontColor);
     ObjectSetString(0, labelObj, OBJPROP_TEXT, labelTxt);
-    ObjectMove(0, labelObj, 0, t, price + (Alfred.compassYOffset + 20) * _Point);
-    // --- Draw Warning ---
+    ObjectSetInteger(0, labelObj, OBJPROP_ANCHOR, ANCHOR_LOWER);
+    ObjectMove(0, labelObj, 0, barTime, price_anchor + (Alfred.compassYOffset + 20) * _Point);
+
     string warnObj = "CompassConflictObj";
-    if(g_confirmedConflict)
+    if(conflict)
     {
-        if(ObjectFind(0, warnObj) < 0) ObjectCreate(0, warnObj, OBJ_TEXT, 0, t, price);
+        if(ObjectFind(0, warnObj) < 0) ObjectCreate(0, warnObj, OBJ_TEXT, 0, 0, 0);
         ObjectSetInteger(0, warnObj, OBJPROP_FONTSIZE, 10);
         ObjectSetInteger(0, warnObj, OBJPROP_COLOR, clrRed);
         ObjectSetString(0, warnObj, OBJPROP_TEXT, "⚠️ Conflict with MagnetHUD");
-        ObjectMove(0, warnObj, 0, t, price + (Alfred.compassYOffset + 38) * _Point);
+        ObjectSetInteger(0, warnObj, OBJPROP_ANCHOR, ANCHOR_LOWER);
+        ObjectMove(0, warnObj, 0, barTime, price_anchor + (Alfred.compassYOffset + 38) * _Point);
     }
     else if(ObjectFind(0, warnObj) >= 0)
     {
@@ -177,7 +193,7 @@ void UpdateChartVisuals()
 
 
 //+------------------------------------------------------------------+
-//| Calculate RAW Multi-TF bias (Original Logic)                     |
+//| Calculate RAW Multi-TF bias (Original Logic, Unchanged)          |
 //+------------------------------------------------------------------+
 int GetRawCompassBias(bool &conflict, string &biasText)
 {
@@ -221,7 +237,7 @@ int GetRawCompassBias(bool &conflict, string &biasText)
 }
 
 //+------------------------------------------------------------------+
-//| Grab Magnet direction from SupDemCore                            |
+//| Grab Magnet direction from SupDemCore (Unchanged)                |
 //+------------------------------------------------------------------+
 string GetMagnetDirection()
 {
@@ -231,8 +247,7 @@ string GetMagnetDirection()
 }
 
 //+------------------------------------------------------------------+
-//|
-//| Zone reader (as in SupDemCore)                                   |
+//| Zone reader (as in SupDemCore) (Unchanged)                       |
 //+------------------------------------------------------------------+
 double GetTFMagnet(ENUM_TIMEFRAMES tf,
                    string &direction,
@@ -240,7 +255,7 @@ double GetTFMagnet(ENUM_TIMEFRAMES tf,
                    string &eta)
 {
    string dZones[] = {"DZone_LTF","DZone_H1","DZone_H4","DZone_D1"};
-   string sZones[] = {"SZone_LTF","SZone_H1","SZone_H4","SZone_D1"};
+   string sZones[] = {"SZone_LTF","SZone_H1","SZone_H4","DZone_D1"};
    double scoreD=-DBL_MAX, scoreS=-DBL_MAX, bestD=EMPTY_VALUE, bestS=EMPTY_VALUE;
 
    for(int i=0; i<ArraySize(dZones); i++)
@@ -275,8 +290,7 @@ double GetTFMagnet(ENUM_TIMEFRAMES tf,
 }
 
 //+------------------------------------------------------------------+
-//|
-//| --- Helper Functions ---                                         |
+//| --- Helper Functions --- (Unchanged)                             |
 //+------------------------------------------------------------------+
 ENUM_BIAS TextToBias(string biasText)
 {
