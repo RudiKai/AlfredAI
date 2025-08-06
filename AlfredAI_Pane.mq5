@@ -1,6 +1,6 @@
 //+------------------------------------------------------------------+
 //|                        AlfredAI_Pane.mq5                         |
-//|         v1.5 - Finalized SupDem Buffer Integration               |
+//|             v1.6 - Fully Live & Finalized                        |
 //|                                                                  |
 //| Copyright 2024, RudiKai                                          |
 //|                     https://github.com/RudiKai                   |
@@ -8,7 +8,7 @@
 #property strict
 #property indicator_chart_window
 #property indicator_plots 0 // Suppress "no indicator plot" warning
-#property version "1.5"
+#property version "1.6"
 
 // --- Optional Inputs ---
 input bool ShowDebugInfo = false;          // Toggle for displaying debug information
@@ -150,6 +150,8 @@ void UpdateLiveDataCaches()
         string tf_str = g_timeframe_strings[i];
 
         // --- Cache AlfredCompass Data (Bias & Confidence) via iCustom ---
+        // Buffer 0: Bias (1=Buy, 0=Neutral, -1=Sell)
+        // Buffer 1: Confidence (0.0 to 1.0, multiplied by 100 for display)
         int compass_handle = iCustom(_Symbol, tf, "AlfredCompass.ex5");
         if(compass_handle != INVALID_HANDLE)
         {
@@ -159,7 +161,7 @@ void UpdateLiveDataCaches()
                 if(bias_buffer[0] > 0.5) g_compass_cache[i].bias = BIAS_BULL;
                 else if(bias_buffer[0] < -0.5) g_compass_cache[i].bias = BIAS_BEAR;
                 else g_compass_cache[i].bias = BIAS_NEUTRAL;
-                g_compass_cache[i].confidence = conf_buffer[0];
+                g_compass_cache[i].confidence = conf_buffer[0] * 100.0; // Convert to percentage
                 if(EnableDebugLogging) PrintFormat("PaneCache: Compass %s -> Bias: %s, Conf: %.1f", tf_str, EnumToString(g_compass_cache[i].bias), g_compass_cache[i].confidence);
             }
             else {
@@ -173,11 +175,8 @@ void UpdateLiveDataCaches()
         }
 
         // --- Cache AlfredSupDemCore Data (Zones & Magnets) via iCustom Buffers ---
-        // This logic assumes SupDemCore now publishes its data to indicator buffers.
-        // Buffer 0: Zone Type (1=Demand, -1=Supply)
-        // Buffer 1: Magnet Level (Midpoint price)
-        // Buffer 2: Zone Price 1 (High)
-        // Buffer 3: Zone Price 2 (Low)
+        // Buffer 1: Zone Status (-1=Supply, 0=None, 1=Demand)
+        // Buffer 2: Magnet Level (price)
         int supdem_handle = iCustom(_Symbol, tf, "AlfredSupDemCore.ex5");
         if(supdem_handle != INVALID_HANDLE)
         {
@@ -189,24 +188,17 @@ void UpdateLiveDataCaches()
             g_supdem_cache[i].zone_p1 = 0.0;
             g_supdem_cache[i].zone_p2 = 0.0;
 
-            // Buffer 0: Zone Type
-            if(CopyBuffer(supdem_handle, 0, 0, 1, zone_buffer) > 0)
+            // Buffer 1: Zone Status
+            if(CopyBuffer(supdem_handle, 1, 0, 1, zone_buffer) > 0)
             {
                 if(zone_buffer[0] > 0.5) g_supdem_cache[i].zone = ZONE_DEMAND;
                 else if(zone_buffer[0] < -0.5) g_supdem_cache[i].zone = ZONE_SUPPLY;
             }
             
-            // Buffer 1: Magnet Level
-            if(CopyBuffer(supdem_handle, 1, 0, 1, magnet_buffer) > 0)
+            // Buffer 2: Magnet Level
+            if(CopyBuffer(supdem_handle, 2, 0, 1, magnet_buffer) > 0)
             {
                 g_supdem_cache[i].magnet_level = magnet_buffer[0];
-            }
-
-            // Buffer 2 & 3: Zone Boundaries for interaction checks
-            if(CopyBuffer(supdem_handle, 2, 0, 1, p1_buffer) > 0 && CopyBuffer(supdem_handle, 3, 0, 1, p2_buffer) > 0)
-            {
-                g_supdem_cache[i].zone_p1 = p1_buffer[0];
-                g_supdem_cache[i].zone_p2 = p2_buffer[0];
             }
             
             if(EnableDebugLogging) PrintFormat("PaneCache: SupDem %s -> Zone: %s, Magnet: %.5f", tf_str, EnumToString(g_supdem_cache[i].zone), g_supdem_cache[i].magnet_level);
@@ -286,26 +278,15 @@ ENUM_TRADE_SIGNAL GetTradeSignal()
 
 ENUM_ZONE_INTERACTION GetCurrentZoneInteraction()
 {
-    // Uses cached zone boundaries for the current chart timeframe
-    int index = GetCacheIndex(_Period);
-    if(index == -1) return INTERACTION_NONE;
-
-    double p1 = g_supdem_cache[index].zone_p1;
-    double p2 = g_supdem_cache[index].zone_p2;
-    ENUM_ZONE zone_type = g_supdem_cache[index].zone;
-
-    if(zone_type == ZONE_NONE || p1 == 0 || p2 == 0) return INTERACTION_NONE;
-
-    double high_zone = MathMax(p1, p2);
-    double low_zone = MathMin(p1, p2);
-    double current_price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-
-    if(current_price >= low_zone && current_price <= high_zone)
+    // This logic is now simplified as SupDemCore does not provide boundaries via buffers.
+    // It relies on the Zone Status buffer. A more advanced version could read object properties if needed.
+    ENUM_ZONE current_zone = GetZoneStatus(_Period);
+    switch(current_zone)
     {
-        if(zone_type == ZONE_DEMAND) return INTERACTION_INSIDE_DEMAND;
-        if(zone_type == ZONE_SUPPLY) return INTERACTION_INSIDE_SUPPLY;
+        case ZONE_DEMAND: return INTERACTION_INSIDE_DEMAND;
+        case ZONE_SUPPLY: return INTERACTION_INSIDE_SUPPLY;
+        default: return INTERACTION_NONE;
     }
-    return INTERACTION_NONE;
 }
 
 ENUM_HEATMAP_STATUS GetZoneHeatmapStatus(ENUM_TIMEFRAMES tf)
@@ -817,7 +798,7 @@ void CreatePanel()
     y_offset += SPACING_LARGE;
     
     // --- Footer & Debug Info ---
-    CreateLabel("footer", "AlfredAI™ Pane · v1.4 · Built for Traders", PANE_X_POS + PANE_WIDTH - 10, y_offset, COLOR_FOOTER, FONT_SIZE_NORMAL - 1, ANCHOR_RIGHT);
+    CreateLabel("footer", "AlfredAI™ Pane · v1.6 · Built for Traders", PANE_X_POS + PANE_WIDTH - 10, y_offset, COLOR_FOOTER, FONT_SIZE_NORMAL - 1, ANCHOR_RIGHT);
     y_offset += SPACING_MEDIUM;
     if(ShowDebugInfo)
     {
