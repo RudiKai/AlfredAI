@@ -1,18 +1,46 @@
 //+------------------------------------------------------------------+
 //|                           AlfredHUD™                             |
-//|                            v1.00                                 |
+//|                            v1.10 (Export Buffers)                |
+//| (MODIFIED: Added export buffers for multi-TF zone status)        |
 //+------------------------------------------------------------------+
 #property indicator_chart_window
 #property strict
-#property indicator_buffers 1
-#property indicator_plots   1
+
+// --- MODIFICATION: Increased buffer count for data export ---
+#property indicator_buffers 6 // 1 dummy + 5 for TF zones
+#property indicator_plots   6
+
+// --- Original dummy buffer ---
 #property indicator_type1   DRAW_NONE
 #property indicator_label1  "AlfredHUD™"
+double dummyBuffer[];
+
+// --- MODIFICATION: Added buffers for each timeframe's zone status ---
+#property indicator_type2   DRAW_NONE
+#property indicator_label2  "H4_Zone"
+double h4ZoneBuffer[];
+
+#property indicator_type3   DRAW_NONE
+#property indicator_label3  "H2_Zone"
+double h2ZoneBuffer[];
+
+#property indicator_type4   DRAW_NONE
+#property indicator_label4  "H1_Zone"
+double h1ZoneBuffer[];
+
+#property indicator_type5   DRAW_NONE
+#property indicator_label5  "M30_Zone"
+double m30ZoneBuffer[];
+
+#property indicator_type6   DRAW_NONE
+#property indicator_label6  "M15_Zone"
+double m15ZoneBuffer[];
+// --- END MODIFICATION ---
 
 #include <AlfredSettings.mqh>
 #include <AlfredInit.mqh>
 
-double dummyBuffer[];
+SAlfred Alfred;
 int    maHandle = INVALID_HANDLE;
 
 //--------------------------------------------------------------------
@@ -153,13 +181,37 @@ string GetCompassBias(string magnetDirection, double slope)
    return "📍 Compass: " + biasDir + " " + biasStr + " [" + alignStr + "]";
 }
 
-//--------------------------------------------------------------------
-// Initialization
+//+------------------------------------------------------------------+
+//| Initialization                                                   |
+//+------------------------------------------------------------------+
 int OnInit()
 {
-   InitAlfredDefaults();
+   // --- MODIFICATION: Initialize SAlfred struct ---
+   // This ensures the struct is usable even without the include file.
+   // A more robust solution would be a centralized settings manager.
+   Alfred.enableHUD = true;
+   Alfred.hudCorner = CORNER_LEFT_LOWER;
+   Alfred.hudXOffset = 10;
+   Alfred.hudYOffset = 10;
+   Alfred.fontSize = 10;
+   Alfred.enableHUDDiagnostics = false;
+   // --- END MODIFICATION ---
+
+   // --- MODIFICATION: Set up all indicator buffers ---
    SetIndexBuffer(0, dummyBuffer, INDICATOR_DATA);
+   SetIndexBuffer(1, h4ZoneBuffer, INDICATOR_DATA);
+   SetIndexBuffer(2, h2ZoneBuffer, INDICATOR_DATA);
+   SetIndexBuffer(3, h1ZoneBuffer, INDICATOR_DATA);
+   SetIndexBuffer(4, m30ZoneBuffer, INDICATOR_DATA);
+   SetIndexBuffer(5, m15ZoneBuffer, INDICATOR_DATA);
+
    ArrayInitialize(dummyBuffer, EMPTY_VALUE);
+   ArrayInitialize(h4ZoneBuffer, 0.0);
+   ArrayInitialize(h2ZoneBuffer, 0.0);
+   ArrayInitialize(h1ZoneBuffer, 0.0);
+   ArrayInitialize(m30ZoneBuffer, 0.0);
+   ArrayInitialize(m15ZoneBuffer, 0.0);
+   // --- END MODIFICATION ---
 
    // create MA handle
    maHandle = iMA(_Symbol, _Period, 8, 0, MODE_SMA, PRICE_CLOSE);
@@ -169,8 +221,9 @@ int OnInit()
    return(INIT_SUCCEEDED);
 }
 
-//--------------------------------------------------------------------
-// Main HUD Loop
+//+------------------------------------------------------------------+
+//| Main HUD Loop                                                    |
+//+------------------------------------------------------------------+
 int OnCalculate(const int rates_total,
                 const int prev_calculated,
                 const datetime &time[],
@@ -182,6 +235,18 @@ int OnCalculate(const int rates_total,
                 const long     &volume[],
                 const int      &spread[])
 {
+   // --- MODIFICATION: Populate the export buffers on every tick ---
+   int bar_index = rates_total - 1;
+   if(bar_index < 0) return rates_total;
+
+   // Check each timeframe and set the buffer value
+   h4ZoneBuffer[bar_index]  = (ObjectFind(0, "DZone_H4") >= 0 || ObjectFind(0, "SZone_H4") >= 0) ? 1.0 : 0.0;
+   h2ZoneBuffer[bar_index]  = (ObjectFind(0, "DZone_H2") >= 0 || ObjectFind(0, "SZone_H2") >= 0) ? 1.0 : 0.0;
+   h1ZoneBuffer[bar_index]  = (ObjectFind(0, "DZone_H1") >= 0 || ObjectFind(0, "SZone_H1") >= 0) ? 1.0 : 0.0;
+   m30ZoneBuffer[bar_index] = (ObjectFind(0, "DZone_M30") >= 0 || ObjectFind(0, "SZone_M30") >= 0) ? 1.0 : 0.0;
+   m15ZoneBuffer[bar_index] = (ObjectFind(0, "DZone_M15") >= 0 || ObjectFind(0, "SZone_M15") >= 0) ? 1.0 : 0.0;
+   // --- END MODIFICATION ---
+
    if(!Alfred.enableHUD)
       return(rates_total);
 
@@ -192,7 +257,7 @@ int OnCalculate(const int rates_total,
 
    int lineHeight = Alfred.fontSize + 5;
 
-   // draw each TF line
+   // draw each TF line (Original visual logic remains unchanged)
    for(int i = 0; i < ArraySize(TFList); i++)
    {
       ENUM_TIMEFRAMES tf   = TFList[i];
