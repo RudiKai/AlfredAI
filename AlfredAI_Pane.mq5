@@ -1,6 +1,6 @@
 //+------------------------------------------------------------------+
 //|                        AlfredAI_Pane.mq5                         |
-//|             v1.6 - Fully Live & Finalized                        |
+//|             v1.7 - Integrated HUD Zone Activity                  |
 //|                                                                  |
 //| Copyright 2024, RudiKai                                          |
 //|                     https://github.com/RudiKai                   |
@@ -8,7 +8,7 @@
 #property strict
 #property indicator_chart_window
 #property indicator_plots 0 // Suppress "no indicator plot" warning
-#property version "1.6"
+#property version "1.7"
 
 // --- Optional Inputs ---
 input bool ShowDebugInfo = false;          // Toggle for displaying debug information
@@ -16,6 +16,7 @@ input bool EnableDebugLogging = false;     // Toggle for printing detailed data 
 input bool ShowZoneHeatmap = true;         // Toggle for the Zone Heatmap
 input bool ShowMagnetProjection = true;    // Toggle for the Magnet Projection status
 input bool ShowMultiTFMagnets = true;      // Toggle for the Multi-TF Magnet Summary
+input bool ShowHUDActivitySection = true;  // Toggle for the HUD Zone Activity section
 input bool ShowConfidenceMatrix = true;    // Toggle for the Confidence Matrix
 input bool ShowTradeRecommendation = true; // Toggle for the Trade Recommendation
 input bool ShowRiskModule = true;          // Toggle for the Risk & Positioning module
@@ -55,6 +56,7 @@ struct AlertData { ENUM_ALERT_STATUS status; string text; };
 // --- Structs for Live Data Caching ---
 struct CachedCompassData { ENUM_BIAS bias; double confidence; };
 struct CachedSupDemData  { ENUM_ZONE zone; double magnet_level; double zone_p1; double zone_p2; };
+struct CachedHUDData { bool zone_active; };
 
 // --- Constants for Panel Layout
 #define PANE_PREFIX "AlfredPane_"
@@ -130,10 +132,14 @@ string g_magnet_summary_tf_strings[] = {"M15", "H1", "H4", "D1"};
 ENUM_TIMEFRAMES g_magnet_summary_tfs[] = {PERIOD_M15, PERIOD_H1, PERIOD_H4, PERIOD_D1};
 string g_matrix_tf_strings[] = {"M15", "H1", "H4", "D1"};
 ENUM_TIMEFRAMES g_matrix_tfs[] = {PERIOD_M15, PERIOD_H1, PERIOD_H4, PERIOD_D1};
+string g_hud_tf_strings[] = {"M15", "H1", "H4", "D1"};
+ENUM_TIMEFRAMES g_hud_tfs[] = {PERIOD_M15, PERIOD_H1, PERIOD_H4, PERIOD_D1};
+
 
 // --- Live Data Caches ---
 CachedCompassData g_compass_cache[7];
 CachedSupDemData  g_supdem_cache[7];
+CachedHUDData     g_hud_cache[7];
 
 
 //+------------------------------------------------------------------+
@@ -144,14 +150,15 @@ void UpdateLiveDataCaches()
 {
     if(EnableDebugLogging) Print("--- AlfredPane: Updating Live Data Caches ---");
 
+    // Get handles ONCE per update cycle for efficiency
+    int hud_handle = iCustom(_Symbol, _Period, "AlfredHUD.ex5"); 
+
     for(int i = 0; i < ArraySize(g_timeframes); i++)
     {
         ENUM_TIMEFRAMES tf = g_timeframes[i];
         string tf_str = g_timeframe_strings[i];
 
         // --- Cache AlfredCompass Data (Bias & Confidence) via iCustom ---
-        // Buffer 0: Bias (1=Buy, 0=Neutral, -1=Sell)
-        // Buffer 1: Confidence (0.0 to 1.0, multiplied by 100 for display)
         int compass_handle = iCustom(_Symbol, tf, "AlfredCompass.ex5");
         if(compass_handle != INVALID_HANDLE)
         {
@@ -161,7 +168,7 @@ void UpdateLiveDataCaches()
                 if(bias_buffer[0] > 0.5) g_compass_cache[i].bias = BIAS_BULL;
                 else if(bias_buffer[0] < -0.5) g_compass_cache[i].bias = BIAS_BEAR;
                 else g_compass_cache[i].bias = BIAS_NEUTRAL;
-                g_compass_cache[i].confidence = conf_buffer[0] * 100.0; // Convert to percentage
+                g_compass_cache[i].confidence = conf_buffer[0]; // Confidence is already 0-100 from Compass
                 if(EnableDebugLogging) PrintFormat("PaneCache: Compass %s -> Bias: %s, Conf: %.1f", tf_str, EnumToString(g_compass_cache[i].bias), g_compass_cache[i].confidence);
             }
             else {
@@ -175,40 +182,66 @@ void UpdateLiveDataCaches()
         }
 
         // --- Cache AlfredSupDemCore Data (Zones & Magnets) via iCustom Buffers ---
-        // Buffer 1: Zone Status (-1=Supply, 0=None, 1=Demand)
-        // Buffer 2: Magnet Level (price)
         int supdem_handle = iCustom(_Symbol, tf, "AlfredSupDemCore.ex5");
         if(supdem_handle != INVALID_HANDLE)
         {
-            double zone_buffer[1], magnet_buffer[1], p1_buffer[1], p2_buffer[1];
-            
-            // Reset cache before attempting to fill
+            double zone_buffer[1], magnet_buffer[1];
             g_supdem_cache[i].zone = ZONE_NONE;
             g_supdem_cache[i].magnet_level = 0.0;
-            g_supdem_cache[i].zone_p1 = 0.0;
-            g_supdem_cache[i].zone_p2 = 0.0;
-
-            // Buffer 1: Zone Status
-            if(CopyBuffer(supdem_handle, 1, 0, 1, zone_buffer) > 0)
+            if(CopyBuffer(supdem_handle, 0, 0, 1, zone_buffer) > 0) // ZoneStatus is buffer 0 in SupDemCore v1.1
             {
                 if(zone_buffer[0] > 0.5) g_supdem_cache[i].zone = ZONE_DEMAND;
                 else if(zone_buffer[0] < -0.5) g_supdem_cache[i].zone = ZONE_SUPPLY;
             }
-            
-            // Buffer 2: Magnet Level
-            if(CopyBuffer(supdem_handle, 2, 0, 1, magnet_buffer) > 0)
+            if(CopyBuffer(supdem_handle, 1, 0, 1, magnet_buffer) > 0) // MagnetLevel is buffer 1
             {
                 g_supdem_cache[i].magnet_level = magnet_buffer[0];
             }
-            
             if(EnableDebugLogging) PrintFormat("PaneCache: SupDem %s -> Zone: %s, Magnet: %.5f", tf_str, EnumToString(g_supdem_cache[i].zone), g_supdem_cache[i].magnet_level);
         }
         else
         {
              if(EnableDebugLogging) PrintFormat("PaneCache: SupDem %s -> INVALID_HANDLE", tf_str);
         }
+
+        // --- Cache AlfredHUD Data (Zone Activity) ---
+        if(hud_handle != INVALID_HANDLE)
+        {
+            // The buffer indices in AlfredHUD.ex5 are fixed:
+            // 1: H4, 2: H2, 3: H1, 4: M30, 5: M15. Buffer 0 is a dummy.
+            int buffer_index = -1;
+            if(tf == PERIOD_M15) buffer_index = 5;
+            else if(tf == PERIOD_H1) buffer_index = 3;
+            else if(tf == PERIOD_H4) buffer_index = 1;
+            // Note: D1, H2, M30 etc. are not mapped here intentionally.
+
+            if(buffer_index != -1)
+            {
+                double activity_buffer[1];
+                if(CopyBuffer(hud_handle, buffer_index, 0, 1, activity_buffer) > 0)
+                {
+                    g_hud_cache[i].zone_active = (activity_buffer[0] > 0.5);
+                    if(EnableDebugLogging) PrintFormat("PaneCache: HUD %s -> Zone Active: %s (from buffer %d)", tf_str, g_hud_cache[i].zone_active ? "Yes" : "No", buffer_index);
+                }
+                else
+                {
+                    g_hud_cache[i].zone_active = false;
+                    if(EnableDebugLogging) PrintFormat("PaneCache: HUD %s -> FAILED to copy buffer %d", tf_str, buffer_index);
+                }
+            }
+            else
+            {
+                g_hud_cache[i].zone_active = false; // Not a TF we track for HUD activity
+            }
+        }
+        else
+        {
+            g_hud_cache[i].zone_active = false;
+            if(i == 0 && EnableDebugLogging) PrintFormat("PaneCache: HUD -> INVALID_HANDLE"); // Print only once
+        }
     }
 }
+
 
 // Helper to get the correct cache index for a given timeframe
 int GetCacheIndex(ENUM_TIMEFRAMES tf)
@@ -262,6 +295,16 @@ double GetMagnetLevelTF(ENUM_TIMEFRAMES tf)
     return 0.0;
 }
 
+bool GetHUDZoneActivity(ENUM_TIMEFRAMES tf)
+{
+    int index = GetCacheIndex(tf);
+    if(index != -1)
+    {
+        return g_hud_cache[index].zone_active;
+    }
+    return false;
+}
+
 double GetMagnetProjectionLevel() 
 {
     // Uses the live data function for the chart's current timeframe
@@ -278,8 +321,6 @@ ENUM_TRADE_SIGNAL GetTradeSignal()
 
 ENUM_ZONE_INTERACTION GetCurrentZoneInteraction()
 {
-    // This logic is now simplified as SupDemCore does not provide boundaries via buffers.
-    // It relies on the Zone Status buffer. A more advanced version could read object properties if needed.
     ENUM_ZONE current_zone = GetZoneStatus(_Period);
     switch(current_zone)
     {
@@ -594,6 +635,10 @@ void CreatePanel()
         CreateLabel("setting_heatmap_value", "---", settings_x2, y_offset, COLOR_NA);
         y_offset += SPACING_MEDIUM;
         
+        CreateLabel("setting_hud_activity_prefix", "🛰️ HUD Activity:", settings_x1, y_offset, COLOR_HEADER);
+        CreateLabel("setting_hud_activity_value", "---", settings_x2, y_offset, COLOR_NA);
+        y_offset += SPACING_MEDIUM;
+        
         CreateLabel("setting_reco_prefix", "🎯 Trade Signals:", settings_x1, y_offset, COLOR_HEADER);
         CreateLabel("setting_reco_value", "---", settings_x2, y_offset, COLOR_NA);
         y_offset += SPACING_MEDIUM;
@@ -676,6 +721,23 @@ void CreatePanel()
             y_offset += SPACING_MEDIUM;
         }
         DrawSeparator("sep_mtf_magnet", y_offset, x_offset);
+    }
+    
+    // --- HUD Zone Activity Section ---
+    if(ShowHUDActivitySection)
+    {
+        CreateLabel("hud_activity_header", "HUD ZONE ACTIVITY", x_col1, y_offset, COLOR_HEADER, FONT_SIZE_HEADER);
+        y_offset += SPACING_MEDIUM;
+        int hud_activity_x = x_col1 + 20;
+        for(int i = 0; i < ArraySize(g_hud_tf_strings); i++)
+        {
+            string tf = g_hud_tf_strings[i];
+            CreateLabel("hud_activity_tf_"+tf, tf, hud_activity_x, y_offset, COLOR_HEADER, FONT_SIZE_NORMAL, ANCHOR_CENTER);
+            CreateLabel("hud_activity_status_"+tf, "N/A", hud_activity_x, y_offset + 12, COLOR_NA, FONT_SIZE_NORMAL + 2, ANCHOR_CENTER);
+            hud_activity_x += 45;
+        }
+        y_offset += SPACING_LARGE;
+        DrawSeparator("sep_hud_activity", y_offset, x_offset);
     }
     
     // --- Confidence Matrix Section
@@ -798,7 +860,7 @@ void CreatePanel()
     y_offset += SPACING_LARGE;
     
     // --- Footer & Debug Info ---
-    CreateLabel("footer", "AlfredAI™ Pane · v1.6 · Built for Traders", PANE_X_POS + PANE_WIDTH - 10, y_offset, COLOR_FOOTER, FONT_SIZE_NORMAL - 1, ANCHOR_RIGHT);
+    CreateLabel("footer", "AlfredAI™ Pane · v1.7 · Built for Traders", PANE_X_POS + PANE_WIDTH - 10, y_offset, COLOR_FOOTER, FONT_SIZE_NORMAL - 1, ANCHOR_RIGHT);
     y_offset += SPACING_MEDIUM;
     if(ShowDebugInfo)
     {
@@ -820,8 +882,6 @@ void CreatePanel()
 
 //+------------------------------------------------------------------+
 //| UpdatePanel - Main display refresh logic.                        |
-//| NOTE: All modules below are now driven by the live data caches   |
-//| which are populated by UpdateLiveDataCaches() via iCustom().     |
 //+------------------------------------------------------------------+
 void UpdatePanel()
 {
@@ -877,6 +937,7 @@ void UpdatePanel()
         UpdateLabel("setting_matrix_value", ShowConfidenceMatrix ? on : off, ShowConfidenceMatrix ? on_c : off_c);
         UpdateLabel("setting_magnet_value", ShowMultiTFMagnets ? on : off, ShowMultiTFMagnets ? on_c : off_c);
         UpdateLabel("setting_heatmap_value", ShowZoneHeatmap ? on : off, ShowZoneHeatmap ? on_c : off_c);
+        UpdateLabel("setting_hud_activity_value", ShowHUDActivitySection ? on : off, ShowHUDActivitySection ? on_c : off_c);
         UpdateLabel("setting_reco_value", ShowTradeRecommendation ? on : off, ShowTradeRecommendation ? on_c : off_c);
         UpdateLabel("setting_emotion_value", ShowEmotionalState ? on : off, ShowEmotionalState ? on_c : off_c);
         UpdateLabel("setting_alert_value", ShowAlertCenter ? on : off, ShowAlertCenter ? on_c : off_c);
@@ -945,6 +1006,29 @@ void UpdatePanel()
 
             UpdateLabel("mtf_magnet_relation_"+tf_str, MagnetRelationTFToString(relation), relation_color);
             UpdateLabel("mtf_magnet_level_"+tf_str, level_text, relation_color);
+        }
+    }
+
+    // --- Update HUD Zone Activity ---
+    if(ShowHUDActivitySection)
+    {
+        for(int i = 0; i < ArraySize(g_hud_tfs); i++)
+        {
+            ENUM_TIMEFRAMES tf = g_hud_tfs[i];
+            string tf_str = g_hud_tf_strings[i];
+            
+            // D1 data is not available from AlfredHUD.ex5
+            if(tf == PERIOD_D1)
+            {
+                UpdateLabel("hud_activity_status_"+tf_str, "N/A", COLOR_NA);
+                continue;
+            }
+            
+            bool is_active = GetHUDZoneActivity(tf);
+            string status_text = is_active ? "✅" : "❌";
+            color status_color = is_active ? COLOR_BULL : COLOR_BEAR;
+            
+            UpdateLabel("hud_activity_status_"+tf_str, status_text, status_color);
         }
     }
     
@@ -1072,11 +1156,11 @@ void UpdatePanel()
     {
         int active_modules = 0;
         if(ShowZoneHeatmap) active_modules++; if(ShowMagnetProjection) active_modules++;
-        if(ShowMultiTFMagnets) active_modules++; if(ShowConfidenceMatrix) active_modules++;
-        if(ShowTradeRecommendation) active_modules++; if(ShowRiskModule) active_modules++;
-        if(ShowSessionModule) active_modules++; if(ShowNewsModule) active_modules++;
-        if(ShowEmotionalState) active_modules++; if(ShowAlertCenter) active_modules++;
-        if(ShowPaneSettings) active_modules++;
+        if(ShowMultiTFMagnets) active_modules++; if(ShowHUDActivitySection) active_modules++;
+        if(ShowConfidenceMatrix) active_modules++; if(ShowTradeRecommendation) active_modules++; 
+        if(ShowRiskModule) active_modules++; if(ShowSessionModule) active_modules++; 
+        if(ShowNewsModule) active_modules++; if(ShowEmotionalState) active_modules++; 
+        if(ShowAlertCenter) active_modules++; if(ShowPaneSettings) active_modules++;
         
         string debug_text = StringFormat("Modules Active: %d | %s · %s | Updated: %s",
                                          active_modules,
@@ -1111,8 +1195,7 @@ int OnInit()
        g_compass_cache[i].confidence = 0.0;
        g_supdem_cache[i].zone = ZONE_NONE;
        g_supdem_cache[i].magnet_level = 0.0;
-       g_supdem_cache[i].zone_p1 = 0.0;
-       g_supdem_cache[i].zone_p2 = 0.0;
+       g_hud_cache[i].zone_active = false;
     }
 
     RedrawPanel();
@@ -1161,12 +1244,6 @@ void OnDeinit(const int reason)
 {
     EventKillTimer();
     IndicatorRelease(hATR_current);
-    
-    // NOTE: This indicator (AlfredAI_Pane) does not draw the on-chart
-    // compass labels. Those are drawn by AlfredCompass.ex5. To hide
-    // them, you must disable the visuals in the AlfredCompass indicator's
-    // input settings directly on the chart.
-    
     ObjectsDeleteAll(0, PANE_PREFIX);
     ChartRedraw();
 }
