@@ -1,234 +1,218 @@
 //+------------------------------------------------------------------+
-//|                       AlfredAlertCenter™                         |
-//|                            v1.00                                 |
+//|                       AlfredAlertCenter.mq5                      |
+//|                  v2.0 - Brain Integrated (Phase 1.4)             |
+//|       Sends Telegram alerts based on AlfredBrain signals.        |
+//|              Copyright 2025, AlfredAI Project                    |
 //+------------------------------------------------------------------+
 #property indicator_chart_window
 #property strict
-#property indicator_buffers 1
-#property indicator_plots   1
-#property indicator_type1   DRAW_NONE
-#property indicator_label1  "AlfredAlertCenter™"
+#property version "2.0"
+#property description "Sends Telegram alerts for AlfredBrain signals"
 
-#include <AlfredSettings.mqh>
-#include <AlfredInit.mqh>
+// --- This indicator has no buffers or plots; it only sends alerts.
+#property indicator_plots 0
 
-double dummyBuffer[];
-string lastBias = "Neutral";
+//--- Indicator Inputs
+input int    MinConfidenceThreshold = 13;          // Min confidence score (0-20) to trigger an alert
+input string TelegramToken          = "<YOUR_BOT_TOKEN>"; // Your Telegram Bot Token
+input string TelegramChatID         = "<YOUR_CHAT_ID>";   // Your Telegram Chat ID or Channel ID
+
+// --- Globals to prevent duplicate alerts
+static datetime g_lastAlertBarTime = 0;
+
+// --- Helper Enums (copied from AlfredBrain for decoding)
+enum ENUM_TRADE_SIGNAL
+{
+    SIGNAL_NONE = 0,
+    SIGNAL_BUY  = 1,
+    SIGNAL_SELL = -1
+};
+
+enum ENUM_REASON_CODE
+{
+    REASON_NONE,
+    REASON_BUY_LIQ_GRAB_ALIGNED,
+    REASON_SELL_LIQ_GRAB_ALIGNED,
+    REASON_NO_ZONE,
+    REASON_LOW_ZONE_STRENGTH,
+    REASON_BIAS_CONFLICT
+};
 
 //+------------------------------------------------------------------+
-//| Initialization                                                   |
+//| Custom indicator initialization function                         |
 //+------------------------------------------------------------------+
 int OnInit()
 {
-   InitAlfredDefaults();
-   SetIndexBuffer(0, dummyBuffer, INDICATOR_DATA);
-   ArrayInitialize(dummyBuffer, EMPTY_VALUE);
+   //--- Check if WebRequest is allowed (FIXED using integer value)
+   // The integer value for TERMINAL_WEB_REQUEST_ENABLED is 26.
+   if((int)TerminalInfoInteger(26) == 0)
+     {
+      Print("Error: WebRequest is not enabled. Please enable it in Tools -> Options -> Expert Advisors.");
+      return(INIT_FAILED);
+     }
+   Print("✅ AlfredAlertCenter Initialized. Monitoring for high-confidence signals...");
    return(INIT_SUCCEEDED);
 }
 
 //+------------------------------------------------------------------+
-//| Main iteration                                                   |
+//| Main Calculation - Runs once per bar to check for alerts         |
 //+------------------------------------------------------------------+
 int OnCalculate(const int rates_total,
                 const int prev_calculated,
                 const datetime &time[],
-                const double   &open[],
-                const double   &high[],
-                const double   &low[],
-                const double   &close[],
-                const long     &tick_volume[],
-                const long     &volume[],
-                const int      &spread[])
+                const double &open[],
+                const double &high[],
+                const double &low[],
+                const double &close[],
+                const long &tick_volume[],
+                const long &volume[],
+                const int &spread[])
 {
-   if(!Alfred.enableAlertCenter)
-      return(rates_total);
+    //--- Only run on the close of a new bar
+    if(rates_total < 2)
+        return(rates_total);
 
-   string magnetDir = GetMagnetDirection();
-   string arrow, biasText;
-   bool   conflict = false;
-   int    confidence = GetCompassBias(magnetDir, arrow, biasText, conflict);
+    datetime currentBarTime = time[rates_total - 1];
 
-   // Strong Bias Aligned
-   if(Alfred.alertStrongBiasAligned
-      && confidence >= Alfred.alertConfidenceThreshold
-      && !conflict)
-      TriggerAlert("Strong Bias Aligned: " + biasText +
-                   " (" + IntegerToString(confidence) + "%)");
+    //--- Avoid duplicate alerts on the same bar
+    if(currentBarTime == g_lastAlertBarTime)
+    {
+        return(rates_total);
+    }
 
-   // Divergence Detected
-   if(Alfred.alertDivergence && conflict)
-      TriggerAlert("Divergence Detected: Compass vs MagnetHUD");
+    //--- 1. Fetch latest data from AlfredBrain ---
+    double brain_data[4]; // 0:Signal, 1:Confidence, 2:ReasonCode, 3:ZoneTF
+    if(CopyBuffer(iCustom(_Symbol, _Period, "AlfredBrain.ex5"), 0, 0, 4, brain_data) < 4)
+    {
+       // If Brain is not available, cannot proceed.
+       return(rates_total);
+    }
 
-   // Zone Entry Confirmed
-   if(Alfred.alertZoneEntry
-      && IsInsideZone()
-      && confidence >= Alfred.alertConfidenceThreshold)
-      TriggerAlert("Zone Entry Confirmed: Price inside zone");
+    ENUM_TRADE_SIGNAL signal = (ENUM_TRADE_SIGNAL)brain_data[0];
+    double confidence        = brain_data[1];
+    ENUM_REASON_CODE reason  = (ENUM_REASON_CODE)brain_data[2];
+    int zone_tf_minutes      = (int)brain_data[3];
 
-   // Bias Flip Detected
-   if(Alfred.alertBiasFlip
-      && biasText != lastBias
-      && lastBias != "Neutral")
-      TriggerAlert("Bias Flip Detected: " + lastBias +
-                   " → " + biasText);
+    //--- 2. Check Alert Conditions ---
+    if(signal != SIGNAL_NONE && confidence >= MinConfidenceThreshold)
+    {
+        //--- Conditions met, send the alert ---
+        SendTelegramAlert(signal, confidence, reason, zone_tf_minutes);
 
-   lastBias = biasText;
-   return(rates_total);
+        //--- Update the timestamp to prevent sending another alert for this bar
+        g_lastAlertBarTime = currentBarTime;
+    }
+
+    return(rates_total);
 }
 
 //+------------------------------------------------------------------+
-//| Dispatch an alert on–screen & in log                             |
+//|               SEND TELEGRAM ALERT FUNCTION                     |
 //+------------------------------------------------------------------+
-void TriggerAlert(string msg)
+void SendTelegramAlert(ENUM_TRADE_SIGNAL signal, double confidence, ENUM_REASON_CODE reason, int zone_tf_minutes)
 {
-   Print("🔔 AlfredAlertCenter: ", msg);
+   //--- 1. Validate inputs
+   if(TelegramToken == "<YOUR_BOT_TOKEN>" || TelegramChatID == "<YOUR_CHAT_ID>" || TelegramToken == "" || TelegramChatID == "")
+     {
+      Print("Telegram credentials are not set. Please update indicator inputs.");
+      return;
+     }
 
-   string obj   = "AlertLabel_" + IntegerToString(TimeLocal());
-   double price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   datetime t   = iTime(_Symbol, _Period, 0);
+   //--- 2. Format the message components
+   string signal_str = (signal == SIGNAL_BUY) ? "BUY" : "SELL";
+   string zone_tf_str = PeriodMinutesToTFString(zone_tf_minutes);
+   string reason_str = ReasonCodeToString(reason);
+   string server_time_str = TimeToString(TimeCurrent(), TIME_MINUTES);
 
-   ObjectCreate(0, obj, OBJ_TEXT, 0, t, price);
-   ObjectSetInteger(0, obj, OBJPROP_FONTSIZE, 10);
-   ObjectSetInteger(0, obj, OBJPROP_COLOR,    clrOrangeRed);
-   ObjectSetString (0, obj, OBJPROP_TEXT,     msg);
-   ObjectMove      (0, obj, 0, t, price + 30 * _Point);
+   //--- 3. Build the full message string
+   string message = "🚨 *AlfredAI Trade Alert* 🚨\n\n"
+                    "📈 *Signal:* " + signal_str + "\n"
+                    "🔹 *Confidence:* " + (string)confidence + " / 20\n"
+                    "🧱 *Zone:* " + zone_tf_str + ((signal == SIGNAL_BUY) ? " Demand" : " Supply") + "\n"
+                    "🧠 *Alfred Says:* \"" + reason_str + "\"\n\n"
+                    "💬 *Time:* " + server_time_str + " (server) | *Symbol:* " + _Symbol;
 
-if(Alfred.sendTelegram)
-{
-   // TODO: call your Telegram API here
+   //--- 4. URL Encode the message for the web request
+   string encoded_message = message;
+   StringReplace(encoded_message, " ", "%20");
+   StringReplace(encoded_message, "\n", "%0A");
+   StringReplace(encoded_message, "&", "%26");
+   StringReplace(encoded_message, "*", "%2A");
+   StringReplace(encoded_message, "_", "%5F");
+
+
+   //--- 5. Construct the final URL
+   string url = "https://api.telegram.org/bot" + TelegramToken +
+                "/sendMessage?chat_id=" + TelegramChatID +
+                "&text=" + encoded_message + "&parse_mode=Markdown";
+
+   //--- 6. Send the WebRequest
+   char post_data[];
+   char result[];
+   int result_code;
+   string result_headers;
+
+   ResetLastError();
+   result_code = WebRequest("GET", url, NULL, NULL, 5000, post_data, 0, result, result_headers);
+
+   //--- 7. Handle the response
+   if(result_code == 200)
+     {
+      Print("Telegram alert sent successfully for " + _Symbol);
+     }
+   else
+     {
+      PrintFormat("Error sending Telegram alert for %s. Code: %d, Error: %s", _Symbol, result_code, GetLastErrorDescription(GetLastError()));
+     }
 }
 
-if(Alfred.sendWhatsApp)
+
+//+------------------------------------------------------------------+
+//|                      HELPER FUNCTIONS                          |
+//+------------------------------------------------------------------+
+
+//--- Converts reason code buffer value to a readable string
+string ReasonCodeToString(ENUM_REASON_CODE code)
 {
-   // TODO: call your WhatsApp API here
-}
+    switch(code)
+    {
+        case REASON_BUY_LIQ_GRAB_ALIGNED:
+            return "Strong demand + liquidity grab + HTF bias match.";
+        case REASON_SELL_LIQ_GRAB_ALIGNED:
+            return "Strong supply + liquidity grab + HTF bias match.";
+        // These reasons won't typically generate alerts but are here for completeness
+        case REASON_NO_ZONE:
+            return "Price is not inside an active Supply/Demand zone.";
+        case REASON_LOW_ZONE_STRENGTH:
+            return "Active zone strength is below threshold.";
+        case REASON_BIAS_CONFLICT:
+            return "HTF and LTF biases are in conflict.";
+        case REASON_NONE:
+        default:
+            return "High confluence setup detected.";
+    }
 }
 
-//+------------------------------------------------------------------+
-//| Multi-TF compass scanner                                         |
-//+------------------------------------------------------------------+
-int GetCompassBias(string magnetDir,
-                   string &arrow,
-                   string &biasText,
-                   bool   &conflict)
+//--- Converts zone TF in minutes to a string label
+string PeriodMinutesToTFString(int minutes)
 {
-   ENUM_TIMEFRAMES TFList[] = { PERIOD_M15, PERIOD_H1, PERIOD_H4 };
-   int buy = 0, sell = 0;
-
-   for(int i = 0; i < ArraySize(TFList); i++)
-   {
-      ENUM_TIMEFRAMES tf = TFList[i];
-      double slope = iMA(_Symbol, tf, 8, 3, MODE_SMA, PRICE_CLOSE)
-                   - iMA(_Symbol, tf, 8, 0, MODE_SMA, PRICE_CLOSE);
-
-      int upC=0, downC=0;
-      for(int j=1; j<=5; j++)
-      {
-         double cNow  = iClose(_Symbol, tf, j);
-         double cPrev = iClose(_Symbol, tf, j+1);
-         if(cNow > cPrev) upC++;
-         if(cNow < cPrev) downC++;
-      }
-
-      if(slope > 0.0003 || upC >= 4) buy++;
-      if(slope < -0.0003|| downC >= 4) sell++;
-   }
-
-   int confidence = 50;
-   arrow        = "→";
-   biasText     = "Neutral";
-   conflict     = false;
-
-   if(buy > sell)
-   {
-      arrow      = "↑";
-      biasText   = "Buy";
-      confidence = MathMin(70 + buy * 5, 100);
-      conflict   = (magnetDir == "🔴 Supply");
-   }
-   else if(sell > buy)
-   {
-      arrow      = "↓";
-      biasText   = "Sell";
-      confidence = MathMin(70 + sell * 5, 100);
-      conflict   = (magnetDir == "🟢 Demand");
-   }
-
-   return(confidence);
+    if(minutes >= 1440) return "D"+IntegerToString(minutes/1440);
+    if(minutes >= 60)   return "H"+IntegerToString(minutes/60);
+    if(minutes > 0)     return "M"+IntegerToString(minutes);
+    return "Chart"; // Fallback
 }
 
-//+------------------------------------------------------------------+
-//| MagnetHUD direction (from SupDemCore)                           |
-//+------------------------------------------------------------------+
-string GetMagnetDirection()
+//--- Translates MQL5 GetLastError() into a readable string
+string GetLastErrorDescription(int error_code)
 {
-   string d,s,e;
-   GetTFMagnet(PERIOD_H1, d, s, e);
-   return(d);
+    switch(error_code)
+    {
+        case 4014: return "WebRequest function is not allowed";
+        case 4015: return "Error opening URL";
+        case 4016: return "Error connecting to URL";
+        case 4017: return "Error sending request";
+        case 4018: return "Error receiving data";
+        default:   return "Unknown WebRequest error (" + (string)error_code + ")";
+    }
 }
-
 //+------------------------------------------------------------------+
-//| Zone-inside check                                                |
-//+------------------------------------------------------------------+
-bool IsInsideZone()
-{
-   string zones[] = {
-      "DZone_LTF","DZone_H1","DZone_H4","DZone_D1",
-      "SZone_LTF","SZone_H1","SZone_H4","SZone_D1"
-   };
-   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-
-   for(int i=0; i<ArraySize(zones); i++)
-   {
-      string z = zones[i];
-      if(ObjectFind(0, z) < 0) continue;
-      double p1 = ObjectGetDouble(0, z, OBJPROP_PRICE, 0);
-      double p2 = ObjectGetDouble(0, z, OBJPROP_PRICE, 1);
-      if(bid >= MathMin(p1,p2) && bid <= MathMax(p1,p2))
-         return(true);
-   }
-   return(false);
-}
-
-//+------------------------------------------------------------------+
-//| SupDemCore zone reader                                           |
-//+------------------------------------------------------------------+
-double GetTFMagnet(ENUM_TIMEFRAMES tf,
-                   string &direction,
-                   string &strength,
-                   string &eta)
-{
-   string dZones[] = {"DZone_LTF","DZone_H1","DZone_H4","DZone_D1"};
-   string sZones[] = {"SZone_LTF","SZone_H1","SZone_H4","SZone_D1"};
-   double scoreD = -DBL_MAX, scoreS = -DBL_MAX, bestD=EMPTY_VALUE, bestS=EMPTY_VALUE;
-
-   for(int i=0; i<ArraySize(dZones); i++)
-   {
-      string z = dZones[i];
-      if(ObjectFind(0,z) < 0) continue;
-      double p1 = ObjectGetDouble(0,z,OBJPROP_PRICE,0);
-      double p2 = ObjectGetDouble(0,z,OBJPROP_PRICE,1);
-      double mid= (p1+p2)/2;
-      double sc = 1000 - MathAbs(SymbolInfoDouble(_Symbol,SYMBOL_BID)-mid)/_Point
-                     - MathAbs(p1-p2)/_Point;
-      if(sc > scoreD) { scoreD = sc; bestD = mid; }
-   }
-
-   for(int i=0; i<ArraySize(sZones); i++)
-   {
-      string z = sZones[i];
-      if(ObjectFind(0,z) < 0) continue;
-      double p1 = ObjectGetDouble(0,z,OBJPROP_PRICE,0);
-      double p2 = ObjectGetDouble(0,z,OBJPROP_PRICE,1);
-      double mid= (p1+p2)/2;
-      double sc = 1000 - MathAbs(SymbolInfoDouble(_Symbol,SYMBOL_BID)-mid)/_Point
-                     - MathAbs(p1-p2)/_Point;
-      if(sc > scoreS) { scoreS = sc; bestS = mid; }
-   }
-
-   bool useD = (scoreD >= scoreS);
-   direction = useD ? "🟢 Demand" : "🔴 Supply";
-   strength  = "";
-   eta       = "~";
-   return(useD ? bestD : bestS);
-}
