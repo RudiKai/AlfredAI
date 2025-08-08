@@ -1,6 +1,6 @@
 //+------------------------------------------------------------------+
 //|                       AlfredAlertCenter.mq5                      |
-//|                  v2.0 - Brain Integrated (Phase 1.4)             |
+//|                  v2.0 - Brain Integrated (Live)                  |
 //|       Sends Telegram alerts based on AlfredBrain signals.        |
 //|              Copyright 2025, AlfredAI Project                    |
 //+------------------------------------------------------------------+
@@ -14,8 +14,8 @@
 
 //--- Indicator Inputs
 input int    MinConfidenceThreshold = 13;          // Min confidence score (0-20) to trigger an alert
-input string TelegramToken          = "<YOUR_BOT_TOKEN>"; // Your Telegram Bot Token
-input string TelegramChatID         = "<YOUR_CHAT_ID>";   // Your Telegram Chat ID or Channel ID
+input string TelegramToken          = "8108702678:AAHVifzEw3AHY8rzcBxwvRbiqPEoZ1ZH6Nk"; // Your Telegram Bot Token
+input string TelegramChatID         = "8336722682";   // Your Telegram Chat ID or Channel ID
 
 // --- Globals to prevent duplicate alerts
 static datetime g_lastAlertBarTime = 0;
@@ -44,10 +44,10 @@ enum ENUM_REASON_CODE
 int OnInit()
 {
    //--- Check if WebRequest is allowed (FIXED using integer value)
-   // The integer value for TERMINAL_WEB_REQUEST_ENABLED is 26.
+   // The integer value for TERMINAL_WEBREQUEST_ENABLED is 26.
    if((int)TerminalInfoInteger(26) == 0)
      {
-      Print("Error: WebRequest is not enabled. Please enable it in Tools -> Options -> Expert Advisors.");
+      Print("Error: WebRequest is not enabled. Please go to Tools -> Options -> Expert Advisors and add 'https://api.telegram.org' to the list.");
       return(INIT_FAILED);
      }
    Print("✅ AlfredAlertCenter Initialized. Monitoring for high-confidence signals...");
