@@ -1,25 +1,18 @@
 //+------------------------------------------------------------------+
-//|                       AlfredDebugHelper.mq5                      |
-//|                        v2.0 (Phase 1.2)                          |
-//|      Prints live data from Alfred modules for validation.        |
+//|                    AAI_Script_DebugHelper.mq5                    |
+//|                        v2.0 (Corrected)                          |
+//|       Runs ONCE to print live data from Alfred modules.          |
 //|              Copyright 2025, AlfredAI Project                    |
 //+------------------------------------------------------------------+
-
-#property indicator_chart_window
 #property strict
+#property script_show_inputs // Defines this file as a script
 #property version "2.0"
 
-// --- This indicator has no buffers or plots; it only prints.
-#property indicator_plots 0
-
-// --- Constants for Analysis (should match AlfredBrain)
+// --- Constants for Analysis (should match SignalBrain)
 const ENUM_TIMEFRAMES HTF = PERIOD_H4;
 const ENUM_TIMEFRAMES LTF = PERIOD_M15;
 
-// --- Globals for per-bar execution
-datetime g_lastBarTime = 0;
-
-// --- Helper Enums (copied from AlfredBrain for decoding)
+// --- Helper Enums (copied from SignalBrain for decoding)
 enum ENUM_REASON_CODE
 {
     REASON_NONE,
@@ -31,64 +24,41 @@ enum ENUM_REASON_CODE
 };
 
 //+------------------------------------------------------------------+
-//| Custom indicator initialization function                         |
+//| Script program start function                                    |
 //+------------------------------------------------------------------+
-int OnInit()
+void OnStart()
 {
-    Print("✅ AlfredDebugHelper Initialized. Waiting for new bar to print data...");
-    return(INIT_SUCCEEDED);
-}
+    Print("✅ AAI DebugHelper Script Running...");
 
-//+------------------------------------------------------------------+
-//| Main Calculation - Runs once per bar to print debug info         |
-//+------------------------------------------------------------------+
-int OnCalculate(const int rates_total,
-                const int prev_calculated,
-                const datetime &time[],
-                const double &open[],
-                const double &high[],
-                const double &low[],
-                const double &close[],
-                const long &tick_volume[],
-                const long &volume[],
-                const int &spread[])
-{
-    //--- Only run on the close of a new bar
-    if(rates_total < 2 || time[rates_total - 1] == g_lastBarTime)
-    {
-        return(rates_total);
-    }
-    g_lastBarTime = time[rates_total - 1];
-
-    //--- 1. Fetch Compass Data ---
+    //--- 1. Fetch BiasCompass Data ---
     double htf_bias_arr[1], ltf_bias_arr[1];
-    CopyBuffer(iCustom(_Symbol, HTF, "AlfredCompass.ex5"), 0, 0, 1, htf_bias_arr);
-    CopyBuffer(iCustom(_Symbol, LTF, "AlfredCompass.ex5"), 0, 0, 1, ltf_bias_arr);
+    CopyBuffer(iCustom(_Symbol, HTF, "AAI_Indicator_BiasCompass.ex5"), 0, 1, 1, htf_bias_arr); // Use index 1 for closed bar data
+    CopyBuffer(iCustom(_Symbol, LTF, "AAI_Indicator_BiasCompass.ex5"), 0, 1, 1, ltf_bias_arr);
     string htf_bias_str = BiasToString(htf_bias_arr[0]);
     string ltf_bias_str = BiasToString(ltf_bias_arr[0]);
 
-    //--- 2. Fetch SupDemCore Data (from current chart timeframe) ---
-    double supdem_data[6]; // 0:Status, 1:Magnet, 2:Strength, 3:Fresh, 4:Vol, 5:Liq
-    CopyBuffer(iCustom(_Symbol, _Period, "AlfredSupDemCore.ex5"), 0, 0, 6, supdem_data);
-    string zone_type_str = ZoneTypeToString(supdem_data[0]);
-    double zone_score = supdem_data[2];
-    string liq_grab_str = (supdem_data[5] > 0.5) ? "true" : "false";
+    //--- 2. Fetch ZoneEngine Data (from current chart timeframe) ---
+    double zone_engine_data[6]; // 0:Status, 1:Magnet, 2:Strength, 3:Fresh, 4:Vol, 5:Liq
+    CopyBuffer(iCustom(_Symbol, _Period, "AAI_Indicator_ZoneEngine.ex5"), 0, 1, 6, zone_engine_data);
+    string zone_type_str = ZoneTypeToString(zone_engine_data[0]);
+    double zone_score = zone_engine_data[2];
+    string liq_grab_str = (zone_engine_data[5] > 0.5) ? "true" : "false";
     
-    //--- 3. Fetch Brain Data ---
+    //--- 3. Fetch SignalBrain Data ---
     double brain_data[4]; // 0:Signal, 1:Confidence, 2:ReasonCode, 3:ZoneTF
-    CopyBuffer(iCustom(_Symbol, _Period, "AlfredBrain.ex5"), 0, 0, 4, brain_data);
+    CopyBuffer(iCustom(_Symbol, _Period, "AAI_Indicator_SignalBrain.ex5"), 0, 1, 4, brain_data);
     string signal_str = SignalToString(brain_data[0]);
     double confidence_score = brain_data[1];
     string reason_str = ReasonCodeToString(brain_data[2]);
     string zone_tf_str = PeriodSecondsToTFString((int)brain_data[3] * 60);
     
     //--- 4. Format and Print All Data ---
-    Print("------------------------------------------------------------------");
+    Print("-------------------[ AAI DEBUG REPORT ]-------------------");
     PrintFormat("🧭 Compass — HTF Bias: %s, LTF Bias: %s", htf_bias_str, ltf_bias_str);
-    PrintFormat("🧱 SupDem — Zone: %s %s | Score: %.0f | LiquidityGrab: %s", zone_tf_str, zone_type_str, zone_score, liq_grab_str);
-    PrintFormat("🧠 Brain — Signal: %s | Confidence: %.0f | Reason: \"%s\"", signal_str, confidence_score, reason_str);
+    PrintFormat("🧱 ZoneEngine — Zone: %s %s | Score: %.0f | LiquidityGrab: %s", zone_tf_str, zone_type_str, zone_score, liq_grab_str);
+    PrintFormat("🧠 SignalBrain — Signal: %s | Confidence: %.0f | Reason: \"%s\"", signal_str, confidence_score, reason_str);
+    Print("----------------------------------------------------------");
 
-    return(rates_total);
 }
 
 //+------------------------------------------------------------------+
