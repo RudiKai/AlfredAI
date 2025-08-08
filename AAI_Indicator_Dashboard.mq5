@@ -1,16 +1,16 @@
 //+------------------------------------------------------------------+
-//|                        AlfredAI_Pane.mq5                         |
-//|             v1.8.5 - Unified & Feature Complete                  |
-//| (Combines v1.8.5 layout with all logic from v1.8.3)              |
-//| Copyright 2024, RudiKai                                          |
-//|                     https://github.com/RudiKai                   |
+//|                   AAI_Indicator_Dashboard.mq5                    |
+//|             v2.0 - Unified & Feature Complete                    |
+//|        (Displays all data from the AAI indicator suite)          |
+//|              Copyright 2025, AlfredAI Project                    |
 //+------------------------------------------------------------------+
 #property strict
 #property indicator_chart_window
 #property indicator_plots 0 // Suppress "no indicator plot" warning
-#property version "1.85" // FIX: Version format corrected for MQL Market
+#property version "2.0"
 
 // --- Optional Inputs ---
+input bool ShowAlfredBrainModule = true;        // Show AlfredBrain signal module
 input bool ShowDebugInfo = false;               // Toggle for displaying debug information
 input bool EnableDebugLogging = false;          // Toggle for printing detailed data fetch logs to the Experts tab
 input bool ShowZoneHeatmap = true;              // Toggle for the Zone Heatmap
@@ -25,10 +25,11 @@ input bool ShowNewsModule = true;               // Toggle for the Upcoming News 
 input bool ShowEmotionalState = true;           // Toggle for the Emotional State module
 input bool ShowAlertCenter = true;              // Toggle for the Alert Center module
 input bool ShowPaneSettings = true;             // Toggle for the Pane Settings summary module
-input bool ShowAlfredSays = true;               // NEW: Toggle for the "Alfred Says" module
+input bool ShowAlfredSays = true;               // Toggle for the "Alfred Says" module
 
 // --- Includes
 #include <ChartObjects\ChartObjectsTxtControls.mqh>
+#include <AAI_Include_Settings.mqh> // UPDATED INCLUDE
 
 // --- Enums for State Management
 enum ENUM_BIAS { BIAS_BULL, BIAS_BEAR, BIAS_NEUTRAL };
@@ -41,6 +42,15 @@ enum ENUM_VOLATILITY { VOLATILITY_LOW, VOLATILITY_MEDIUM, VOLATILITY_HIGH };
 enum ENUM_NEWS_IMPACT { IMPACT_LOW, IMPACT_MEDIUM, IMPACT_HIGH };
 enum ENUM_EMOTIONAL_STATE { STATE_CAUTIOUS, STATE_CONFIDENT, STATE_OVEREXTENDED, STATE_ANXIOUS, STATE_NEUTRAL };
 enum ENUM_ALERT_STATUS { ALERT_NONE, ALERT_PARTIAL, ALERT_STRONG };
+enum ENUM_REASON_CODE
+{
+    REASON_NONE,
+    REASON_BUY_LIQ_GRAB_ALIGNED,
+    REASON_SELL_LIQ_GRAB_ALIGNED,
+    REASON_NO_ZONE,
+    REASON_LOW_ZONE_STRENGTH,
+    REASON_BIAS_CONFLICT
+};
 
 // --- Structs for Data Handling
 struct LiveTradeData { bool trade_exists; double entry, sl, tp; };
@@ -52,8 +62,8 @@ struct SessionData { string session_name; string session_overlap; ENUM_VOLATILIT
 struct NewsEventData { string time; string currency; string event_name; ENUM_NEWS_IMPACT impact; };
 struct EmotionalStateData { ENUM_EMOTIONAL_STATE state; string text; };
 struct AlertData { ENUM_ALERT_STATUS status; string text; };
-// --- NEW: Struct for Alfred's commentary ---
 struct AlfredComment { string text; color clr; };
+
 // --- Structs for Live Data Caching ---
 struct CachedCompassData { ENUM_BIAS bias; double confidence; };
 struct CachedSupDemData
@@ -68,9 +78,17 @@ struct CachedSupDemData
    double liquidity;
 };
 struct CachedHUDData { bool zone_active; };
+struct CachedBrainData
+{
+   ENUM_TRADE_SIGNAL signal;
+   double confidence;
+   ENUM_REASON_CODE reasonCode;
+   int zoneTF;
+};
+
 
 // --- Constants for Panel Layout
-#define PANE_PREFIX "AlfredPane_"
+#define PANE_PREFIX "AAI_Dashboard_"
 #define PANE_WIDTH 230
 #define PANE_X_POS 15
 #define PANE_Y_POS 15
@@ -129,13 +147,13 @@ struct CachedHUDData { bool zone_active; };
 #define SPACING_SEPARATOR 12
 
 // --- Indicator Handles & Globals
+SAlfred Alfred; // Global settings instance
 int hATR_current;
 int atr_period = 14;
 bool g_biases_expanded = true;
 bool g_hud_expanded = true;
 double g_pip_value;
 
-// FIX: Declare global arrays without initialization
 string g_timeframe_strings[];
 ENUM_TIMEFRAMES g_timeframes[];
 string g_heatmap_tf_strings[];
@@ -151,159 +169,86 @@ ENUM_TIMEFRAMES g_hud_tfs[];
 CachedCompassData g_compass_cache[7];
 CachedSupDemData  g_supdem_cache[7];
 CachedHUDData     g_hud_cache[7];
-// --- NEW: Global for tracking Alfred's last comment to prevent redraws ---
+CachedBrainData   g_brain_cache;
 string g_last_alfred_comment = "";
 
 
 //+------------------------------------------------------------------+
 //|                        LIVE DATA & CACHING FUNCTIONS             |
 //+------------------------------------------------------------------+
-// This function is called once per timer tick to update all external indicator data
 void UpdateLiveDataCaches()
 {
    if(EnableDebugLogging)
-      Print("--- AlfredPane: Updating Live Data Caches ---");
+      Print("--- AAI Dashboard: Updating Live Data Caches ---");
+      
+   // --- Cache SignalBrain Data ---
+   if(ShowAlfredBrainModule)
+   {
+      double brain_buffers[4]; // 0:Signal, 1:Confidence, 2:ReasonCode, 3:ZoneTF
+      if(CopyBuffer(iCustom(_Symbol, _Period, "AAI_Indicator_SignalBrain.ex5"), 0, 0, 4, brain_buffers) >= 4)
+      {
+         g_brain_cache.signal = (ENUM_TRADE_SIGNAL)brain_buffers[0];
+         g_brain_cache.confidence = brain_buffers[1];
+         g_brain_cache.reasonCode = (ENUM_REASON_CODE)brain_buffers[2];
+         g_brain_cache.zoneTF = (int)brain_buffers[3];
+      }
+   }
+      
    // Get handles ONCE per update cycle for efficiency
-   int hud_handle = iCustom(_Symbol, _Period, "AlfredHUD.ex5");
+   int hud_handle = iCustom(_Symbol, _Period, "AAI_Indicator_HUD.ex5");
    for(int i = 0; i < ArraySize(g_timeframes); i++)
    {
       ENUM_TIMEFRAMES tf = g_timeframes[i];
       string tf_str = g_timeframe_strings[i];
 
-      // --- Cache AlfredCompass Data (Bias & Confidence) via iCustom ---
-      int compass_handle = iCustom(_Symbol, tf, "AlfredCompass.ex5");
+      // --- Cache BiasCompass Data ---
+      int compass_handle = iCustom(_Symbol, tf, "AAI_Indicator_BiasCompass.ex5");
       if(compass_handle != INVALID_HANDLE)
       {
          double bias_buffer[1], conf_buffer[1];
          if(CopyBuffer(compass_handle, 0, 0, 1, bias_buffer) > 0 && CopyBuffer(compass_handle, 1, 0, 1, conf_buffer) > 0)
          {
-            if(bias_buffer[0] > 0.5)
-               g_compass_cache[i].bias = BIAS_BULL;
-            else if(bias_buffer[0] < -0.5)
-               g_compass_cache[i].bias = BIAS_BEAR;
-            else
-               g_compass_cache[i].bias = BIAS_NEUTRAL;
+            if(bias_buffer[0] > 0.5) g_compass_cache[i].bias = BIAS_BULL;
+            else if(bias_buffer[0] < -0.5) g_compass_cache[i].bias = BIAS_BEAR;
+            else g_compass_cache[i].bias = BIAS_NEUTRAL;
             g_compass_cache[i].confidence = conf_buffer[0];
-            if(EnableDebugLogging)
-               PrintFormat("PaneCache: Compass %s -> Bias: %s, Conf: %.1f", tf_str, EnumToString(g_compass_cache[i].bias), g_compass_cache[i].confidence);
          }
-         else
-         {
-            g_compass_cache[i].bias = BIAS_NEUTRAL;
-            g_compass_cache[i].confidence = 0;
-            if(EnableDebugLogging)
-               PrintFormat("PaneCache: Compass %s -> FAILED to copy buffers", tf_str);
-         }
-      }
-      else
-      {
-         g_compass_cache[i].bias = BIAS_NEUTRAL;
-         g_compass_cache[i].confidence = 0;
-         if(EnableDebugLogging)
-            PrintFormat("PaneCache: Compass %s -> INVALID_HANDLE", tf_str);
       }
 
-      // --- MODIFIED: Cache AlfredSupDemCore Data (all 6 buffers) via iCustom ---
-      int supdem_handle = iCustom(_Symbol, tf, "AlfredSupDemCore.ex5");
-      if(supdem_handle != INVALID_HANDLE)
+      // --- Cache ZoneEngine Data ---
+      int zone_engine_handle = iCustom(_Symbol, tf, "AAI_Indicator_ZoneEngine.ex5");
+      if(zone_engine_handle != INVALID_HANDLE)
       {
-         // Buffers for all 6 data points from SupDemCore v1.5
          double zone_buffer[1], magnet_buffer[1], strength_buffer[1], fresh_buffer[1], volume_buffer[1], liq_buffer[1];
-         // Reset cache for this TF
          g_supdem_cache[i].zone = ZONE_NONE;
-         g_supdem_cache[i].magnet_level = 0.0;
-         g_supdem_cache[i].strength = 0.0;
-         g_supdem_cache[i].freshness = 0.0;
-         g_supdem_cache[i].volume = 0.0;
-         g_supdem_cache[i].liquidity = 0.0;
-         // Buffer 0: ZoneStatus
-         if(CopyBuffer(supdem_handle, 0, 0, 1, zone_buffer) > 0)
+         if(CopyBuffer(zone_engine_handle, 0, 0, 1, zone_buffer) > 0)
          {
-            if(zone_buffer[0] > 0.5)
-               g_supdem_cache[i].zone = ZONE_DEMAND;
-            else if(zone_buffer[0] < -0.5)
-               g_supdem_cache[i].zone = ZONE_SUPPLY;
+            if(zone_buffer[0] > 0.5) g_supdem_cache[i].zone = ZONE_DEMAND;
+            else if(zone_buffer[0] < -0.5) g_supdem_cache[i].zone = ZONE_SUPPLY;
          }
-         // Buffer 1: MagnetLevel
-         if(CopyBuffer(supdem_handle, 1, 0, 1, magnet_buffer) > 0)
-         {
-            g_supdem_cache[i].magnet_level = magnet_buffer[0];
-         }
-         // Buffer 2: ZoneStrength
-         if(CopyBuffer(supdem_handle, 2, 0, 1, strength_buffer) > 0)
-         {
-            g_supdem_cache[i].strength = strength_buffer[0];
-         }
-         // Buffer 3: ZoneFreshness
-         if(CopyBuffer(supdem_handle, 3, 0, 1, fresh_buffer) > 0)
-         {
-            g_supdem_cache[i].freshness = fresh_buffer[0];
-         }
-         // Buffer 4: ZoneVolume
-         if(CopyBuffer(supdem_handle, 4, 0, 1, volume_buffer) > 0)
-         {
-            g_supdem_cache[i].volume = volume_buffer[0];
-         }
-         // Buffer 5: ZoneLiquidity
-         if(CopyBuffer(supdem_handle, 5, 0, 1, liq_buffer) > 0)
-         {
-            g_supdem_cache[i].liquidity = liq_buffer[0];
-         }
-
-         if(EnableDebugLogging)
-            PrintFormat("PaneCache: SupDem %s -> Zone: %s, Str:%.0f, Fr:%.0f, Vol:%.0f, Liq:%.0f",
-                        tf_str, EnumToString(g_supdem_cache[i].zone),
-                        g_supdem_cache[i].strength, g_supdem_cache[i].freshness,
-                        g_supdem_cache[i].volume, g_supdem_cache[i].liquidity);
-      }
-      else
-      {
-         if(EnableDebugLogging)
-            PrintFormat("PaneCache: SupDem %s -> INVALID_HANDLE", tf_str);
+         if(CopyBuffer(zone_engine_handle, 1, 0, 1, magnet_buffer) > 0) g_supdem_cache[i].magnet_level = magnet_buffer[0];
+         if(CopyBuffer(zone_engine_handle, 2, 0, 1, strength_buffer) > 0) g_supdem_cache[i].strength = strength_buffer[0];
+         if(CopyBuffer(zone_engine_handle, 3, 0, 1, fresh_buffer) > 0) g_supdem_cache[i].freshness = fresh_buffer[0];
+         if(CopyBuffer(zone_engine_handle, 4, 0, 1, volume_buffer) > 0) g_supdem_cache[i].volume = volume_buffer[0];
+         if(CopyBuffer(zone_engine_handle, 5, 0, 1, liq_buffer) > 0) g_supdem_cache[i].liquidity = liq_buffer[0];
       }
 
-
-      // --- Cache AlfredHUD Data (Zone Activity) ---
+      // --- Cache HUD Data ---
       if(hud_handle != INVALID_HANDLE)
       {
-         // The buffer indices in AlfredHUD.ex5 are fixed:
-         // 1: H4, 2: H2, 3: H1, 4: M30, 5: M15.
-         // Buffer 0 is a dummy.
          int buffer_index = -1;
-         if(tf == PERIOD_M15)
-            buffer_index = 5;
-         else if(tf == PERIOD_H1)
-            buffer_index = 3;
-         else if(tf == PERIOD_H4)
-            buffer_index = 1;
-         // Note: D1, H2, M30 etc. are not mapped here intentionally.
+         if(tf == PERIOD_M15) buffer_index = 5;
+         else if(tf == PERIOD_H1) buffer_index = 3;
+         else if(tf == PERIOD_H4) buffer_index = 1;
+         
          if(buffer_index != -1)
          {
             double activity_buffer[1];
             if(CopyBuffer(hud_handle, buffer_index, 0, 1, activity_buffer) > 0)
             {
                g_hud_cache[i].zone_active = (activity_buffer[0] > 0.5);
-               if(EnableDebugLogging)
-                  PrintFormat("PaneCache: HUD %s -> Zone Active: %s (from buffer %d)", tf_str, g_hud_cache[i].zone_active ? "Yes" : "No", buffer_index);
-            }
-            else
-            {
-               g_hud_cache[i].zone_active = false;
-               if(EnableDebugLogging)
-                  PrintFormat("PaneCache: HUD %s -> FAILED to copy buffer %d", tf_str, buffer_index);
             }
          }
-         else
-         {
-            g_hud_cache[i].zone_active = false;
-            // Not a TF we track for HUD activity
-         }
-      }
-      else
-      {
-         g_hud_cache[i].zone_active = false;
-         if(i == 0 && EnableDebugLogging) // Print only once
-            PrintFormat("PaneCache: HUD -> INVALID_HANDLE");
       }
    }
 }
@@ -324,7 +269,6 @@ int GetCacheIndex(ENUM_TIMEFRAMES tf)
 //+------------------------------------------------------------------+
 //|                   LIVE & MOCK DATA FUNCTIONS                     |
 //+------------------------------------------------------------------+
-// --- LIVE DATA: Reads from cached values ---
 CompassData GetCompassData(ENUM_TIMEFRAMES tf)
 {
    CompassData data;
@@ -334,7 +278,7 @@ CompassData GetCompassData(ENUM_TIMEFRAMES tf)
       data.bias = g_compass_cache[index].bias;
       data.confidence = g_compass_cache[index].confidence;
    }
-   else // Fallback if TF not in our main list
+   else
    {
       data.bias = BIAS_NEUTRAL;
       data.confidence = 0.0;
@@ -342,7 +286,6 @@ CompassData GetCompassData(ENUM_TIMEFRAMES tf)
    return data;
 }
 
-// NEW: Get full cached SupDem data
 CachedSupDemData GetSupDemData(ENUM_TIMEFRAMES tf)
 {
    CachedSupDemData data;
@@ -351,7 +294,6 @@ CachedSupDemData GetSupDemData(ENUM_TIMEFRAMES tf)
    {
       return g_supdem_cache[index];
    }
-   // Return empty/default data if not found
    data.zone = ZONE_NONE;
    data.magnet_level = 0.0;
    data.strength = 0.0;
@@ -394,14 +336,11 @@ bool GetHUDZoneActivity(ENUM_TIMEFRAMES tf)
 
 double GetMagnetProjectionLevel()
 {
-   // Uses the live data function for the chart's current timeframe
    return GetMagnetLevelTF(_Period);
 }
 
-// --- LOGIC FUNCTIONS (Now use live data) ---
 ENUM_TRADE_SIGNAL GetTradeSignal()
 {
-   // The final trade signal is now derived from the recommendation logic
    TradeRecommendation rec = GetTradeRecommendation();
    return rec.action;
 }
@@ -411,49 +350,36 @@ ENUM_ZONE_INTERACTION GetCurrentZoneInteraction()
    ENUM_ZONE current_zone = GetZoneStatus(_Period);
    switch(current_zone)
    {
-      case ZONE_DEMAND:
-         return INTERACTION_INSIDE_DEMAND;
-      case ZONE_SUPPLY:
-         return INTERACTION_INSIDE_SUPPLY;
-      default:
-         return INTERACTION_NONE;
+      case ZONE_DEMAND: return INTERACTION_INSIDE_DEMAND;
+      case ZONE_SUPPLY: return INTERACTION_INSIDE_SUPPLY;
+      default: return INTERACTION_NONE;
    }
 }
 
 ENUM_HEATMAP_STATUS GetZoneHeatmapStatus(ENUM_TIMEFRAMES tf)
 {
-   // This now uses the live zone status
    switch(GetZoneStatus(tf))
    {
-      case ZONE_DEMAND:
-         return HEATMAP_DEMAND;
-      case ZONE_SUPPLY:
-         return HEATMAP_SUPPLY;
-      default:
-         return HEATMAP_NONE;
+      case ZONE_DEMAND: return HEATMAP_DEMAND;
+      case ZONE_SUPPLY: return HEATMAP_SUPPLY;
+      default: return HEATMAP_NONE;
    }
 }
 
 ENUM_MAGNET_RELATION GetMagnetProjectionRelation(double price, double magnet)
 {
-   if(price == 0 || magnet == 0)
-      return RELATION_AT;
+   if(price == 0 || magnet == 0) return RELATION_AT;
    double proximity = 5 * _Point;
-   if(price > magnet + proximity)
-      return RELATION_ABOVE;
-   if(price < magnet - proximity)
-      return RELATION_BELOW;
+   if(price > magnet + proximity) return RELATION_ABOVE;
+   if(price < magnet - proximity) return RELATION_BELOW;
    return RELATION_AT;
 }
 
 ENUM_MAGNET_RELATION GetMagnetRelationTF(double price, double magnet)
 {
-   if(price == 0 || magnet == 0)
-      return RELATION_AT;
-   if(price > magnet)
-      return RELATION_ABOVE;
-   if(price < magnet)
-      return RELATION_BELOW;
+   if(price == 0 || magnet == 0) return RELATION_AT;
+   if(price > magnet) return RELATION_ABOVE;
+   if(price < magnet) return RELATION_BELOW;
    return RELATION_AT;
 }
 
@@ -465,17 +391,15 @@ MatrixRowData GetConfidenceMatrixRow(ENUM_TIMEFRAMES tf)
    double magnet_level = GetMagnetLevelTF(tf);
    data.magnet = GetMagnetRelationTF(SymbolInfoDouble(_Symbol, SYMBOL_BID), magnet_level);
 
-   // NEW: Fetch live data from AlfredSupDemCore.ex5 for score calculation
-   double strength_raw = iCustom(_Symbol, tf, "AlfredSupDemCore.ex5", 2, 0);
-   double freshness_raw = iCustom(_Symbol, tf, "AlfredSupDemCore.ex5", 3, 0);
-   double volume_raw = iCustom(_Symbol, tf, "AlfredSupDemCore.ex5", 4, 0);
-   double liquidity_raw = iCustom(_Symbol, tf, "AlfredSupDemCore.ex5", 5, 0);
+   double strength_raw = iCustom(_Symbol, tf, "AAI_Indicator_ZoneEngine.ex5", 2, 0);
+   double freshness_raw = iCustom(_Symbol, tf, "AAI_Indicator_ZoneEngine.ex5", 3, 0);
+   double volume_raw = iCustom(_Symbol, tf, "AAI_Indicator_ZoneEngine.ex5", 4, 0);
+   double liquidity_raw = iCustom(_Symbol, tf, "AAI_Indicator_ZoneEngine.ex5", 5, 0);
 
    int zoneStrength = (int)strength_raw;
    bool zoneFreshness = freshness_raw > 0.5;
    bool zoneVolume = volume_raw > 0.5;
    bool zoneLiquidity = liquidity_raw > 0.5;
-   // Calculate new confidence score based on the requested formula
    data.score = zoneStrength * 2 + (zoneFreshness ? 3 : 0) + (zoneVolume ? 2 : 0) + (zoneLiquidity ? 3 : 0);
    return data;
 }
@@ -486,11 +410,10 @@ TradeRecommendation GetTradeRecommendation()
    rec.action = SIGNAL_NONE;
    rec.reasoning = "Mixed Signals";
    
-   #define STRONG_CONFIDENCE_THRESHOLD 10 // Define what constitutes a "strong" score
+   #define STRONG_CONFIDENCE_THRESHOLD 10
 
    int strong_bullish_tfs = 0;
    int strong_bearish_tfs = 0;
-   // First pass: Count strong TFs based on the new score
    for(int i = 0; i < ArraySize(g_matrix_tfs); i++)
    {
       MatrixRowData row = GetConfidenceMatrixRow(g_matrix_tfs[i]);
@@ -503,13 +426,10 @@ TradeRecommendation GetTradeRecommendation()
       }
    }
 
-   // Second pass: Generate signal and detailed reason
    if(strong_bullish_tfs >= 2)
    {
       rec.action = SIGNAL_BUY;
       rec.reasoning = "Strong Multi-TF Bullish Alignment";
-
-      // Find best confirming zone
       double best_score = -1;
       string best_reason = "";
       for(int i = 0; i < ArraySize(g_matrix_tfs); i++)
@@ -537,8 +457,6 @@ TradeRecommendation GetTradeRecommendation()
    {
       rec.action = SIGNAL_SELL;
       rec.reasoning = "Strong Multi-TF Bearish Alignment";
-
-      // Find best confirming zone
       double best_score = -1;
       string best_reason = "";
       for(int i = 0; i < ArraySize(g_matrix_tfs); i++)
@@ -565,46 +483,37 @@ TradeRecommendation GetTradeRecommendation()
    return rec;
 }
 
-// --- NEW: Alfred's commentary logic ---
 AlfredComment GetAlfredComment()
 {
     AlfredComment comment;
     comment.text = "Alfred is observing...";
     comment.clr = COLOR_TEXT_DIM;
-
     int bull_strong_count = 0;
     int bear_strong_count = 0;
     int total_score = 0;
     int total_tfs = ArraySize(g_matrix_tfs);
-
     for(int i = 0; i < total_tfs; i++)
     {
         MatrixRowData row = GetConfidenceMatrixRow(g_matrix_tfs[i]);
         total_score += row.score;
-        if (row.score >= 10) // Strong confidence threshold
+        if (row.score >= 10)
         {
             if (row.bias == BIAS_BULL) bull_strong_count++;
             else if (row.bias == BIAS_BEAR) bear_strong_count++;
         }
     }
-
-    // --- Condition 1: Strong Bullish Stacking ---
     if (bull_strong_count >= 3 && bear_strong_count == 0)
     {
         comment.text = "Looks like a power move building. Watching upside.";
         comment.clr = COLOR_BULL;
         return comment;
     }
-
-    // --- Condition 2: Strong Bearish Stacking ---
     if (bear_strong_count >= 3 && bull_strong_count == 0)
     {
         comment.text = "Momentum is heavy. Alfred sees potential drops.";
         comment.clr = COLOR_BEAR;
         return comment;
     }
-
-    // --- Condition 3: HTF vs LTF Conflict ---
     MatrixRowData d1_data = GetConfidenceMatrixRow(PERIOD_D1);
     MatrixRowData m15_data = GetConfidenceMatrixRow(PERIOD_M15);
     if (d1_data.bias != BIAS_NEUTRAL && m15_data.bias != BIAS_NEUTRAL && d1_data.bias != m15_data.bias)
@@ -613,17 +522,13 @@ AlfredComment GetAlfredComment()
         comment.clr = COLOR_ALFRED_CAUTION;
         return comment;
     }
-    
-    // --- Condition 4: Fading Momentum ---
     if (bull_strong_count == 0 && bear_strong_count == 0 && (total_score / total_tfs) < 5)
     {
         comment.text = "Momentum fading... don't get caught snoozing, boss.";
         comment.clr = clrSilver;
         return comment;
     }
-    
-    // --- Condition 5: HTF Bias Flip (Proxy) ---
-    if (d1_data.score > 12) // High score on D1
+    if (d1_data.score > 12)
     {
         if (d1_data.bias == BIAS_BULL)
         {
@@ -638,12 +543,9 @@ AlfredComment GetAlfredComment()
            return comment;
         }
     }
-
     return comment;
 }
 
-
-// --- MOCK/STATIC FUNCTIONS (Unchanged, as they are outside the scope of Compass/SupDem) ---
 RiskModuleData GetRiskModuleData()
 {
    RiskModuleData data;
@@ -665,22 +567,14 @@ SessionData GetSessionData()
    MqlDateTime dt;
    TimeCurrent(dt);
    int hour = dt.hour;
-   if(hour >= 13 && hour < 16)
-      data.session_name = "London / NY";
-   else if(hour >= 8 && hour < 13)
-      data.session_name = "London";
-   else if(hour >= 16 && hour < 21)
-      data.session_name = "New York";
-   else if(hour >= 21 || hour < 6)
-      data.session_name = "Sydney";
-   else if(hour >= 6 && hour < 8)
-      data.session_name = "Tokyo";
-   else
-      data.session_name = "Inter-Session";
-   if(hour >= 13 && hour < 16)
-      data.session_overlap = "NY + London";
-   else
-      data.session_overlap = "None";
+   if(hour >= 13 && hour < 16) data.session_name = "London / NY";
+   else if(hour >= 8 && hour < 13) data.session_name = "London";
+   else if(hour >= 16 && hour < 21) data.session_name = "New York";
+   else if(hour >= 21 || hour < 6) data.session_name = "Sydney";
+   else if(hour >= 6 && hour < 8) data.session_name = "Tokyo";
+   else data.session_name = "Inter-Session";
+   if(hour >= 13 && hour < 16) data.session_overlap = "NY + London";
+   else data.session_overlap = "None";
    int rand_val = MathRand() % 3;
    switch(rand_val)
    {
@@ -726,7 +620,6 @@ EmotionalStateData GetEmotionalState()
 AlertData GetAlertCenterStatus()
 {
    AlertData alert;
-   // --- NEW: Check for liquidity grabs first, as they are high-priority ---
    for(int i = 0; i < ArraySize(g_matrix_tfs); i++)
    {
       CachedSupDemData data = GetSupDemData(g_matrix_tfs[i]);
@@ -738,20 +631,16 @@ AlertData GetAlertCenterStatus()
       }
    }
 
-   // --- Original Logic, now using new score thresholds ---
    #define STRONG_CONFIDENCE_THRESHOLD_ALERT 10
    #define MEDIUM_CONFIDENCE_THRESHOLD_ALERT 5
    
    int strong_count = 0;
    int medium_count = 0;
-
    for(int i = 0; i < ArraySize(g_matrix_tfs); i++)
    {
       MatrixRowData row = GetConfidenceMatrixRow(g_matrix_tfs[i]);
-      if(row.score >= STRONG_CONFIDENCE_THRESHOLD_ALERT)
-         strong_count++;
-      else if(row.score >= MEDIUM_CONFIDENCE_THRESHOLD_ALERT)
-         medium_count++;
+      if(row.score >= STRONG_CONFIDENCE_THRESHOLD_ALERT) strong_count++;
+      else if(row.score >= MEDIUM_CONFIDENCE_THRESHOLD_ALERT) medium_count++;
    }
 
    if(strong_count > 0)
@@ -795,173 +684,61 @@ LiveTradeData FetchTradeLevels()
 //+------------------------------------------------------------------+
 //|                        HELPER & CONVERSION FUNCTIONS             |
 //+------------------------------------------------------------------+
+string ReasonCodeToString(ENUM_REASON_CODE code)
+{
+    switch(code)
+    {
+        case REASON_BUY_LIQ_GRAB_ALIGNED: return "Strong demand zone + HTF bias match + liquidity grab confirmed.";
+        case REASON_SELL_LIQ_GRAB_ALIGNED: return "Strong supply zone + HTF bias match + liquidity grab confirmed.";
+        case REASON_NO_ZONE: return "Price is not inside a valid zone.";
+        case REASON_LOW_ZONE_STRENGTH: return "Active zone quality is too low.";
+        case REASON_BIAS_CONFLICT: return "HTF & LTF biases are conflicting.";
+        default: return "No valid setup at the moment. Standing by.";
+    }
+}
+
+string PeriodMinutesToTFString(int minutes)
+{
+    if(minutes >= 1440) return "D"+IntegerToString(minutes/1440);
+    if(minutes >= 60)   return "H"+IntegerToString(minutes/60);
+    if(minutes > 0)     return "M"+IntegerToString(minutes);
+    return "Chart";
+}
 double CalculatePips(double p1, double p2)
 {
-   if(g_pip_value == 0 || p1 == 0 || p2 == 0)
-      return 0;
+   if(g_pip_value == 0 || p1 == 0 || p2 == 0) return 0;
    return MathAbs(p1 - p2) / g_pip_value;
 }
-string BiasToString(ENUM_BIAS b)
-{
-   switch(b) { case BIAS_BULL: return "BULL"; case BIAS_BEAR: return "BEAR"; }
-   return "NEUTRAL";
-}
-color  BiasToColor(ENUM_BIAS b)
-{
-   switch(b) { case BIAS_BULL: return COLOR_BULL; case BIAS_BEAR: return COLOR_BEAR; }
-   return COLOR_NEUTRAL_BIAS;
-}
-string ZoneToString(ENUM_ZONE z)
-{
-   switch(z) { case ZONE_DEMAND: return "Demand"; case ZONE_SUPPLY: return "Supply"; }
-   return "None";
-}
-color  ZoneToColor(ENUM_ZONE z)
-{
-   switch(z) { case ZONE_DEMAND: return COLOR_DEMAND; case ZONE_SUPPLY: return COLOR_SUPPLY; }
-   return COLOR_NA;
-}
-string SignalToString(ENUM_TRADE_SIGNAL s)
-{
-   switch(s) { case SIGNAL_BUY: return "BUY"; case SIGNAL_SELL: return "SELL"; }
-   return "NO SIGNAL";
-}
-color  SignalToColor(ENUM_TRADE_SIGNAL s)
-{
-   switch(s) { case SIGNAL_BUY: return COLOR_BULL; case SIGNAL_SELL: return COLOR_BEAR; }
-   return COLOR_NO_SIGNAL;
-}
-string ZoneInteractionToString(ENUM_ZONE_INTERACTION z)
-{
-   switch(z) { case INTERACTION_INSIDE_DEMAND: return "INSIDE DEMAND"; case INTERACTION_INSIDE_SUPPLY: return "INSIDE SUPPLY"; }
-   return "NO ZONE INTERACTION";
-}
-color  ZoneInteractionToColor(ENUM_ZONE_INTERACTION z)
-{
-   switch(z) { case INTERACTION_INSIDE_DEMAND: return COLOR_DEMAND; case INTERACTION_INSIDE_SUPPLY: return COLOR_SUPPLY; }
-   return COLOR_NA;
-}
-color  ZoneInteractionToHighlightColor(ENUM_ZONE_INTERACTION z)
-{
-   switch(z) { case INTERACTION_INSIDE_DEMAND: return COLOR_HIGHLIGHT_DEMAND; case INTERACTION_INSIDE_SUPPLY: return COLOR_HIGHLIGHT_SUPPLY; }
-   return COLOR_HIGHLIGHT_NONE;
-}
-string HeatmapStatusToString(ENUM_HEATMAP_STATUS s)
-{
-   switch(s) { case HEATMAP_DEMAND: return "D"; case HEATMAP_SUPPLY: return "S"; }
-   return "-";
-}
-color  HeatmapStatusToColor(ENUM_HEATMAP_STATUS s)
-{
-   switch(s) { case HEATMAP_DEMAND: return COLOR_DEMAND; case HEATMAP_SUPPLY: return COLOR_SUPPLY; }
-   return COLOR_NA;
-}
-string MagnetRelationToString(ENUM_MAGNET_RELATION r)
-{
-   switch(r) { case RELATION_ABOVE: return "(Above)"; case RELATION_BELOW: return "(Below)"; }
-   return "(At)";
-}
-color  MagnetRelationToColor(ENUM_MAGNET_RELATION r)
-{
-   switch(r) { case RELATION_ABOVE: return COLOR_BULL; case RELATION_BELOW: return COLOR_BEAR; }
-   return COLOR_MAGNET_AT;
-}
-string MagnetRelationTFToString(ENUM_MAGNET_RELATION r)
-{
-   switch(r) { case RELATION_ABOVE: return "Above"; case RELATION_BELOW: return "Below"; }
-   return "At";
-}
-color  MagnetRelationTFToColor(ENUM_MAGNET_RELATION r)
-{
-   switch(r) { case RELATION_ABOVE: return COLOR_BULL; case RELATION_BELOW: return COLOR_BEAR; }
-   return COLOR_MAGNET_AT;
-}
-color GetConfidenceColor(int score)
-{
-   if(score >= 16) return (color)ColorToARGB(clrDodgerBlue, 120);
-   if(score >= 10) return (color)ColorToARGB(clrLimeGreen, 120);
-   if(score >= 5)  return (color)ColorToARGB(clrGoldenrod, 100);  // Yellow
-   return (color)ColorToARGB(clrOrangeRed, 120);
-}
-string RecoActionToString(ENUM_TRADE_SIGNAL s)
-{
-   switch(s) { case SIGNAL_BUY: return "BUY"; case SIGNAL_SELL: return "SELL"; }
-   return "WAIT";
-}
-color RecoActionToColor(ENUM_TRADE_SIGNAL s)
-{
-   switch(s) { case SIGNAL_BUY: return COLOR_BULL; case SIGNAL_SELL: return COLOR_BEAR; }
-   return COLOR_NO_SIGNAL;
-}
-string VolatilityToString(ENUM_VOLATILITY v)
-{
-   switch(v) { case VOLATILITY_LOW: return "Low"; case VOLATILITY_MEDIUM: return "Medium"; }
-   return "High";
-}
-color VolatilityToColor(ENUM_VOLATILITY v)
-{
-   switch(v) { case VOLATILITY_LOW: return COLOR_BULL; case VOLATILITY_MEDIUM: return COLOR_MAGNET_AT; }
-   return COLOR_BEAR;
-}
-color VolatilityToHighlightColor(ENUM_VOLATILITY v)
-{
-   switch(v) { case VOLATILITY_LOW: return COLOR_VOL_LOW_BG; case VOLATILITY_MEDIUM: return COLOR_VOL_MED_BG; }
-   return COLOR_VOL_HIGH_BG;
-}
-string NewsImpactToString(ENUM_NEWS_IMPACT i)
-{
-   switch(i) { case IMPACT_LOW: return "LOW"; case IMPACT_MEDIUM: return "MEDIUM"; }
-   return "HIGH";
-}
-color NewsImpactToColor(ENUM_NEWS_IMPACT i)
-{
-   switch(i) { case IMPACT_LOW: return COLOR_IMPACT_LOW; case IMPACT_MEDIUM: return COLOR_IMPACT_MEDIUM; }
-   return COLOR_IMPACT_HIGH;
-}
-color EmotionalStateToColor(ENUM_EMOTIONAL_STATE s)
-{
-   switch(s) { case STATE_CAUTIOUS: return COLOR_STATE_CAUTIOUS; case STATE_CONFIDENT: return COLOR_STATE_CONFIDENT; case STATE_OVEREXTENDED: return COLOR_STATE_OVEREXTENDED; case STATE_ANXIOUS: return COLOR_STATE_ANXIOUS; }
-   return COLOR_STATE_NEUTRAL;
-}
-color AlertStatusToColor(ENUM_ALERT_STATUS s)
-{
-   switch(s) { case ALERT_STRONG: return COLOR_ALERT_STRONG; case ALERT_PARTIAL: return COLOR_ALERT_PARTIAL; }
-   return COLOR_ALERT_NONE;
-}
-string GetBiasLabelFromZone(int zone_val)
-{
-   if (zone_val == 1) return "Bull";
-   if (zone_val == -1) return "Bear";
-   return "Neutral";
-}
-color GetBiasColorFromZone(int zone_val)
-{
-   if (zone_val == 1) return COLOR_BULL;
-   if (zone_val == -1) return COLOR_BEAR;
-   return COLOR_NEUTRAL_BIAS;
-}
-string GetMagnetRelationLabel(double current_price, double magnet_level)
-{
-    if (magnet_level == 0.0) return "N/A";
-    double proximity = 5 * _Point;
-    if (current_price > magnet_level + proximity) return "Above";
-    if (current_price < magnet_level - proximity) return "Below";
-    return "At";
-}
-color GetMagnetRelationColor(string relation)
-{
-    if (relation == "Above") return COLOR_BULL;
-    if (relation == "Below") return COLOR_BEAR;
-    if (relation == "At") return COLOR_MAGNET_AT;
-    return COLOR_NA; // For "N/A"
-}
-color GetHeatColorForStrength(int strength)
-{
-   if(strength >= 8) return clrRed;
-   if(strength >= 5) return clrOrange;
-   if(strength >= 1) return clrGold;
-   return clrSilver;
-}
+string BiasToString(ENUM_BIAS b){switch(b){case BIAS_BULL:return"BULL";case BIAS_BEAR:return"BEAR";}return"NEUTRAL";}
+color  BiasToColor(ENUM_BIAS b){switch(b){case BIAS_BULL:return COLOR_BULL;case BIAS_BEAR:return COLOR_BEAR;}return COLOR_NEUTRAL_BIAS;}
+string ZoneToString(ENUM_ZONE z){switch(z){case ZONE_DEMAND:return"Demand";case ZONE_SUPPLY:return"Supply";}return"None";}
+color  ZoneToColor(ENUM_ZONE z){switch(z){case ZONE_DEMAND:return COLOR_DEMAND;case ZONE_SUPPLY:return COLOR_SUPPLY;}return COLOR_NA;}
+string SignalToString(ENUM_TRADE_SIGNAL s){switch(s){case SIGNAL_BUY:return"BUY";case SIGNAL_SELL:return"SELL";}return"NO SIGNAL";}
+color  SignalToColor(ENUM_TRADE_SIGNAL s){switch(s){case SIGNAL_BUY:return COLOR_BULL;case SIGNAL_SELL:return COLOR_BEAR;}return COLOR_NO_SIGNAL;}
+string ZoneInteractionToString(ENUM_ZONE_INTERACTION z){switch(z){case INTERACTION_INSIDE_DEMAND:return"INSIDE DEMAND";case INTERACTION_INSIDE_SUPPLY:return"INSIDE SUPPLY";}return"NO ZONE INTERACTION";}
+color  ZoneInteractionToColor(ENUM_ZONE_INTERACTION z){switch(z){case INTERACTION_INSIDE_DEMAND:return COLOR_DEMAND;case INTERACTION_INSIDE_SUPPLY:return COLOR_SUPPLY;}return COLOR_NA;}
+color  ZoneInteractionToHighlightColor(ENUM_ZONE_INTERACTION z){switch(z){case INTERACTION_INSIDE_DEMAND:return COLOR_HIGHLIGHT_DEMAND;case INTERACTION_INSIDE_SUPPLY:return COLOR_HIGHLIGHT_SUPPLY;}return COLOR_HIGHLIGHT_NONE;}
+string HeatmapStatusToString(ENUM_HEATMAP_STATUS s){switch(s){case HEATMAP_DEMAND:return"D";case HEATMAP_SUPPLY:return"S";}return"-";}
+color  HeatmapStatusToColor(ENUM_HEATMAP_STATUS s){switch(s){case HEATMAP_DEMAND:return COLOR_DEMAND;case HEATMAP_SUPPLY:return COLOR_SUPPLY;}return COLOR_NA;}
+string MagnetRelationToString(ENUM_MAGNET_RELATION r){switch(r){case RELATION_ABOVE:return"(Above)";case RELATION_BELOW:return"(Below)";}return"(At)";}
+color  MagnetRelationToColor(ENUM_MAGNET_RELATION r){switch(r){case RELATION_ABOVE:return COLOR_BULL;case RELATION_BELOW:return COLOR_BEAR;}return COLOR_MAGNET_AT;}
+string MagnetRelationTFToString(ENUM_MAGNET_RELATION r){switch(r){case RELATION_ABOVE:return"Above";case RELATION_BELOW:return"Below";}return"At";}
+color  MagnetRelationTFToColor(ENUM_MAGNET_RELATION r){switch(r){case RELATION_ABOVE:return COLOR_BULL;case RELATION_BELOW:return COLOR_BEAR;}return COLOR_MAGNET_AT;}
+color GetConfidenceColor(int score){if(score>=16)return(color)ColorToARGB(clrDodgerBlue,120);if(score>=10)return(color)ColorToARGB(clrLimeGreen,120);if(score>=5)return(color)ColorToARGB(clrGoldenrod,100);return(color)ColorToARGB(clrOrangeRed,120);}
+string RecoActionToString(ENUM_TRADE_SIGNAL s){switch(s){case SIGNAL_BUY:return"BUY";case SIGNAL_SELL:return"SELL";}return"WAIT";}
+color RecoActionToColor(ENUM_TRADE_SIGNAL s){switch(s){case SIGNAL_BUY:return COLOR_BULL;case SIGNAL_SELL:return COLOR_BEAR;}return COLOR_NO_SIGNAL;}
+string VolatilityToString(ENUM_VOLATILITY v){switch(v){case VOLATILITY_LOW:return"Low";case VOLATILITY_MEDIUM:return"Medium";}return"High";}
+color VolatilityToColor(ENUM_VOLATILITY v){switch(v){case VOLATILITY_LOW:return COLOR_BULL;case VOLATILITY_MEDIUM:return COLOR_MAGNET_AT;}return COLOR_BEAR;}
+color VolatilityToHighlightColor(ENUM_VOLATILITY v){switch(v){case VOLATILITY_LOW:return COLOR_VOL_LOW_BG;case VOLATILITY_MEDIUM:return COLOR_VOL_MED_BG;}return COLOR_VOL_HIGH_BG;}
+string NewsImpactToString(ENUM_NEWS_IMPACT i){switch(i){case IMPACT_LOW:return"LOW";case IMPACT_MEDIUM:return"MEDIUM";}return"HIGH";}
+color NewsImpactToColor(ENUM_NEWS_IMPACT i){switch(i){case IMPACT_LOW:return COLOR_IMPACT_LOW;case IMPACT_MEDIUM:return COLOR_IMPACT_MEDIUM;}return COLOR_IMPACT_HIGH;}
+color EmotionalStateToColor(ENUM_EMOTIONAL_STATE s){switch(s){case STATE_CAUTIOUS:return COLOR_STATE_CAUTIOUS;case STATE_CONFIDENT:return COLOR_STATE_CONFIDENT;case STATE_OVEREXTENDED:return COLOR_STATE_OVEREXTENDED;case STATE_ANXIOUS:return COLOR_STATE_ANXIOUS;}return COLOR_STATE_NEUTRAL;}
+color AlertStatusToColor(ENUM_ALERT_STATUS s){switch(s){case ALERT_STRONG:return COLOR_ALERT_STRONG;case ALERT_PARTIAL:return COLOR_ALERT_PARTIAL;}return COLOR_ALERT_NONE;}
+string GetBiasLabelFromZone(int zone_val){if(zone_val==1)return"Bull";if(zone_val==-1)return"Bear";return"Neutral";}
+color GetBiasColorFromZone(int zone_val){if(zone_val==1)return COLOR_BULL;if(zone_val==-1)return COLOR_BEAR;return COLOR_NEUTRAL_BIAS;}
+string GetMagnetRelationLabel(double current_price,double magnet_level){if(magnet_level==0.0)return"N/A";double proximity=5*_Point;if(current_price>magnet_level+proximity)return"Above";if(current_price<magnet_level-proximity)return"Below";return"At";}
+color GetMagnetRelationColor(string relation){if(relation=="Above")return COLOR_BULL;if(relation=="Below")return COLOR_BEAR;if(relation=="At")return COLOR_MAGNET_AT;return COLOR_NA;}
+color GetHeatColorForStrength(int strength){if(strength>=8)return clrRed;if(strength>=5)return clrOrange;if(strength>=1)return clrGold;return clrSilver;}
 
 
 //+------------------------------------------------------------------+
@@ -1020,6 +797,23 @@ void CreatePanel()
    int x_toggle = PANE_X_POS + PANE_WIDTH - 20;
    CreateLabel("symbol_header", _Symbol, x_offset, y_offset, COLOR_HEADER, 10);
    y_offset += SPACING_LARGE;
+
+   // --- Alfred Signal Section ---
+   if(ShowAlfredBrainModule)
+   {
+      CreateLabel("brain_header", "📈 Alfred Signal", x_col1, y_offset, COLOR_HEADER, FONT_SIZE_HEADER);
+      CreateLabel("brain_signal_value", "---", x_col1 + 95, y_offset, COLOR_NA, FONT_SIZE_HEADER + 1);
+      y_offset += SPACING_MEDIUM;
+      CreateLabel("brain_confidence_value", "🔹 Confidence: -- / 20", x_col1, y_offset, COLOR_TEXT_DIM);
+      y_offset += SPACING_MEDIUM;
+      CreateLabel("brain_setup_type_value", "🧱 Setup Type: ---", x_col1, y_offset, COLOR_TEXT_DIM);
+      y_offset += SPACING_MEDIUM;
+      CreateLabel("brain_reasoning_header", "🧠 Alfred Says:", x_col1, y_offset, COLOR_TEXT_DIM);
+      y_offset += SPACING_MEDIUM;
+      CreateLabel("brain_reasoning_value", "...", x_col1 + 5, y_offset, COLOR_NEUTRAL_TEXT, FONT_SIZE_NORMAL);
+      y_offset += SPACING_LARGE;
+      DrawSeparator("sep_brain", y_offset, x_offset);
+   }
 
    // --- Upcoming News Section
    if(ShowNewsModule)
@@ -1258,7 +1052,7 @@ void CreatePanel()
    y_offset += SPACING_LARGE;
    DrawSeparator("sep_final", y_offset, x_offset);
    
-   // --- NEW: Alfred Says Section ---
+   // --- Alfred Says Section ---
    if(ShowAlfredSays)
    {
       CreateLabel("alfred_says_header", "🗣️ ALFRED SAYS", x_col1, y_offset, COLOR_HEADER, FONT_SIZE_HEADER);
@@ -1268,7 +1062,7 @@ void CreatePanel()
    }
 
    // --- Footer & Debug Info ---
-   CreateLabel("footer", "AlfredAI™ Pane · v1.8.5 · Built for Traders", PANE_X_POS + PANE_WIDTH - 10, y_offset, COLOR_FOOTER, FONT_SIZE_NORMAL - 1, ANCHOR_RIGHT);
+   CreateLabel("footer", "AlfredAI™ Pane · v2.0 · Built for Traders", PANE_X_POS + PANE_WIDTH - 10, y_offset, COLOR_FOOTER, FONT_SIZE_NORMAL - 1, ANCHOR_RIGHT);
    y_offset += SPACING_MEDIUM;
    if(ShowDebugInfo)
    {
@@ -1295,6 +1089,31 @@ void CreatePanel()
 //+------------------------------------------------------------------+
 void UpdatePanel()
 {
+   // --- Update Alfred Signal Section ---
+   if(ShowAlfredBrainModule)
+   {
+       ENUM_TRADE_SIGNAL signal = g_brain_cache.signal;
+       if(signal == SIGNAL_NONE)
+       {
+           UpdateLabel("brain_signal_value", "None", COLOR_NO_SIGNAL);
+           UpdateLabel("brain_confidence_value", "🔹 Confidence: -- / 20", COLOR_TEXT_DIM);
+           UpdateLabel("brain_setup_type_value", "🧱 Setup Type: ---", COLOR_TEXT_DIM);
+           UpdateLabel("brain_reasoning_value", ReasonCodeToString(g_brain_cache.reasonCode), COLOR_TEXT_DIM);
+       }
+       else
+       {
+           string signal_text = (signal == SIGNAL_BUY) ? "BUY" : "SELL";
+           UpdateLabel("brain_signal_value", signal_text, SignalToColor(signal));
+           string conf_text = StringFormat("🔹 Confidence: %.0f / 20", g_brain_cache.confidence);
+           UpdateLabel("brain_confidence_value", conf_text, COLOR_NEUTRAL_TEXT);
+           ENUM_ZONE zone_type = GetZoneStatus(_Period);
+           string zone_tf_str = PeriodMinutesToTFString(g_brain_cache.zoneTF);
+           string setup_type_text = StringFormat("🧱 Setup Type: Reversal (%s %s Zone)", zone_tf_str, ZoneToString(zone_type));
+           UpdateLabel("brain_setup_type_value", setup_type_text, COLOR_NEUTRAL_TEXT);
+           UpdateLabel("brain_reasoning_value", ReasonCodeToString(g_brain_cache.reasonCode), COLOR_NEUTRAL_TEXT);
+       }
+   }
+
    // --- Update Upcoming News ---
    if(ShowNewsModule)
    {
@@ -1343,7 +1162,7 @@ void UpdatePanel()
       for(int i = 0; i < ArraySize(tf_bias_strings); i++)
       {
          string tf_str = tf_bias_strings[i]; ENUM_TIMEFRAMES tf_enum = tf_bias_enums[i];
-         double raw_zone_val = iCustom(_Symbol, tf_enum, "AlfredSupDemCore.ex5", 0, 0); double magnet_level = iCustom(_Symbol, tf_enum, "AlfredSupDemCore.ex5", 1, 0); int zone_val = 0;
+         double raw_zone_val = iCustom(_Symbol, tf_enum, "AAI_Indicator_ZoneEngine.ex5", 0, 0); double magnet_level = iCustom(_Symbol, tf_enum, "AAI_Indicator_ZoneEngine.ex5", 1, 0); int zone_val = 0;
          if(raw_zone_val > 0.5) zone_val = 1; else if(raw_zone_val < -0.5) zone_val = -1; UpdateLabel("biases_" + tf_str + "_value", GetBiasLabelFromZone(zone_val), GetBiasColorFromZone(zone_val));
          ENUM_ZONE zone_enum = ZONE_NONE; if(zone_val == 1) zone_enum = ZONE_DEMAND; else if(zone_val == -1) zone_enum = ZONE_SUPPLY;
          UpdateLabel("zone_" + tf_str + "_value", ZoneToString(zone_enum), ZoneToColor(zone_enum));
@@ -1362,9 +1181,7 @@ void UpdatePanel()
       string fresh_text = (zone_data.freshness > 0.5) ? "Yes" : "No"; color fresh_color = (zone_data.freshness > 0.5) ? COLOR_BULL : COLOR_BEAR;
       UpdateLabel("zone_qual_fresh_value", fresh_text, fresh_color);
       string vol_text = (zone_data.volume > 0.5) ? "Yes" : "No"; color vol_color = (zone_data.volume > 0.5) ? COLOR_BULL : COLOR_BEAR;
-      UpdateLabel("zone_qual_vol_value", vol_text, vol_color);
-      string liq_text = (zone_data.liquidity > 0.5) ? "CONFIRMED" : "No";
-      color liq_color = (zone_data.liquidity > 0.5) ? clrLime : COLOR_BEAR; UpdateLabel("zone_qual_liq_value", liq_text, liq_color);
+      UpdateLabel("zone_qual_liq_value", (zone_data.liquidity > 0.5) ? "CONFIRMED" : "No", (zone_data.liquidity > 0.5) ? clrLime : COLOR_BEAR);
       ObjectSetString(0, PANE_PREFIX + "zone_qual_liq_value", OBJPROP_FONT, (zone_data.liquidity > 0.5) ? "Arial Bold" : "Arial");
    }
    else
@@ -1379,7 +1196,7 @@ void UpdatePanel()
       for(int i = 0; i < ArraySize(g_heatmap_tfs); i++)
       {
          ENUM_TIMEFRAMES tf = g_heatmap_tfs[i];
-         string tf_str = g_heatmap_tf_strings[i]; int strength_score = (int)MathRound(iCustom(_Symbol, tf, "AlfredSupDemCore.ex5", 2, 0)); string heatmap_text;
+         string tf_str = g_heatmap_tf_strings[i]; int strength_score = (int)MathRound(iCustom(_Symbol, tf, "AAI_Indicator_ZoneEngine.ex5", 2, 0)); string heatmap_text;
          if(strength_score >= 8) heatmap_text = "🔥 " + IntegerToString(strength_score); else if(strength_score >= 5) heatmap_text = "🟧 " + IntegerToString(strength_score);
          else if(strength_score >= 1) heatmap_text = "🟨 " + IntegerToString(strength_score); else heatmap_text = "⚪ " + IntegerToString(strength_score);
          UpdateLabel("heatmap_status_" + tf_str, heatmap_text, GetHeatColorForStrength(strength_score));
@@ -1403,7 +1220,7 @@ void UpdatePanel()
       double proximity = 2 * _Point; for(int i = 0; i < ArraySize(g_magnet_summary_tfs); i++)
       {
          ENUM_TIMEFRAMES tf = g_magnet_summary_tfs[i];
-         string tf_str = g_magnet_summary_tf_strings[i]; double magnet_level = iCustom(_Symbol, tf, "AlfredSupDemCore.ex5", 1, 0); string relation_text; color relation_color;
+         string tf_str = g_magnet_summary_tf_strings[i]; double magnet_level = iCustom(_Symbol, tf, "AAI_Indicator_ZoneEngine.ex5", 1, 0); string relation_text; color relation_color;
          if(magnet_level > 0.0)
          {
             if (current_price > magnet_level + proximity) { relation_text = "Above"; relation_color = clrOrangeRed; }
@@ -1521,7 +1338,7 @@ void UpdatePanel()
    ObjectSetString(0, signal_obj, OBJPROP_FONT, (signal == SIGNAL_NONE) ? "Arial Italic" : "Arial Bold");
    ObjectSetInteger(0, signal_obj, OBJPROP_FONTSIZE, (signal == SIGNAL_NONE) ? FONT_SIZE_SIGNAL : FONT_SIZE_SIGNAL_ACTIVE);
    
-   // --- NEW: Update Alfred Says ---
+   // --- Update Alfred Says ---
    if(ShowAlfredSays)
    {
       AlfredComment alfred_comment = GetAlfredComment();
@@ -1613,6 +1430,12 @@ int OnInit()
       g_supdem_cache[i].liquidity = 0.0;
       g_hud_cache[i].zone_active = false;
    }
+   
+   g_brain_cache.signal = SIGNAL_NONE;
+   g_brain_cache.confidence = 0;
+   g_brain_cache.reasonCode = REASON_NONE;
+   g_brain_cache.zoneTF = 0;
+
 
    RedrawPanel();
    UpdateLiveDataCaches(); // Initial data load to prevent "N/A" on first view
@@ -1649,7 +1472,6 @@ void OnChartEvent(const int id, const long &l, const double &d, const string &s)
       if(StringFind(s, PANE_PREFIX) == 0 && StringFind(s, "_toggle") > 0)
       {
          if(s == PANE_PREFIX + "biases_toggle") g_biases_expanded = !g_biases_expanded;
-         // Note: g_hud_expanded toggle from stable version is not needed as the section was removed in the refactor.
          changed = true;
       }
       if(changed) RedrawPanel();
