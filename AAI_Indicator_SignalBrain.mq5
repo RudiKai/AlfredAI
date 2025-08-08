@@ -1,6 +1,6 @@
 //+------------------------------------------------------------------+
-//|                          AlfredBrain.mq5                         |
-//|                        v2.0 (Phase 1.1)                          |
+//|                  AAI_Indicator_SignalBrain.mq5                   |
+//|                        v2.0 (Live Version)                       |
 //|          Acts as the confluence and trade signal engine.         |
 //|              Copyright 2025, AlfredAI Project                    |
 //+------------------------------------------------------------------+
@@ -106,18 +106,17 @@ int OnCalculate(const int rates_total,
     ENUM_REASON_CODE reasonCode = REASON_NONE;
     int zoneTimeframe = 0;
 
-    //--- 2. Fetch data from Alfred Modules on the current timeframe (_Period)
-    double supdem_data[6]; // 0:Status, 1:Magnet, 2:Strength, 3:Fresh, 4:Vol, 5:Liq
-    if(CopyBuffer(iCustom(_Symbol, _Period, "AlfredSupDemCore.ex5"), 0, 0, 6, supdem_data) < 6)
+    //--- 2. Fetch data from AAI Modules on the current timeframe (_Period)
+    double zone_engine_data[6]; // 0:Status, 1:Magnet, 2:Strength, 3:Fresh, 4:Vol, 5:Liq
+    if(CopyBuffer(iCustom(_Symbol, _Period, "AAI_Indicator_ZoneEngine.ex5"), 0, 0, 6, zone_engine_data) < 6)
     {
-       // If SupDemCore is not available, cannot proceed.
-       // Keep default (NONE) values and exit.
+       // If ZoneEngine is not available, cannot proceed.
        return(rates_total);
     }
     
-    double zone_status         = supdem_data[0];
-    double zone_strength       = supdem_data[2];
-    bool   has_liquidity_grab  = (supdem_data[5] > 0.5);
+    double zone_status         = zone_engine_data[0];
+    double zone_strength       = zone_engine_data[2];
+    bool   has_liquidity_grab  = (zone_engine_data[5] > 0.5);
 
     //--- 3. Pre-analysis checks (exit conditions)
     if(zone_status == 0)
@@ -132,8 +131,8 @@ int OnCalculate(const int rates_total,
     {
         //--- 4. Main analysis logic if pre-checks pass
         double htf_bias_arr[1], ltf_bias_arr[1];
-        CopyBuffer(iCustom(_Symbol, HTF, "AlfredCompass.ex5"), 0, 0, 1, htf_bias_arr);
-        CopyBuffer(iCustom(_Symbol, LTF, "AlfredCompass.ex5"), 0, 0, 1, ltf_bias_arr);
+        CopyBuffer(iCustom(_Symbol, HTF, "AAI_Indicator_BiasCompass.ex5"), 0, 0, 1, htf_bias_arr);
+        CopyBuffer(iCustom(_Symbol, LTF, "AAI_Indicator_BiasCompass.ex5"), 0, 0, 1, ltf_bias_arr);
         
         double htf_bias = htf_bias_arr[0];
         double ltf_bias = ltf_bias_arr[0];
