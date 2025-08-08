@@ -1,16 +1,16 @@
 //+------------------------------------------------------------------+
 //|                   AAI_Indicator_ZoneEngine.mq5                   |
-//|          v2.0 - UPGRADED with Liquidity Grab Engine              |
-//|      (Detects stop hunts to validate high-quality zones)         |
+//|        v2.1 - UPGRADED with Price Level Buffer Exports           |
+//|      (Detects zones and exports levels for EA consumption)       |
 //|              Copyright 2025, AlfredAI Project                    |
 //+------------------------------------------------------------------+
 #property indicator_chart_window
 #property strict
-#property version "2.0"
+#property version "2.1"
 
-// --- Six data buffers for exporting live status ---
-#property indicator_buffers 6
-#property indicator_plots   6
+// --- Eight data buffers for exporting live status ---
+#property indicator_buffers 8
+#property indicator_plots   8
 
 #property indicator_label1  "ZoneStatus"
 #property indicator_type1   DRAW_NONE
@@ -22,9 +22,13 @@
 #property indicator_type4   DRAW_NONE
 #property indicator_label5  "ZoneVolume"
 #property indicator_type5   DRAW_NONE
-// --- Buffer 5: Liquidity Grab Status (1=Confirmed, 0=Not) ---
 #property indicator_label6  "ZoneLiquidity"
 #property indicator_type6   DRAW_NONE
+// --- Buffer 6 & 7: Exporting Proximal and Distal price levels of the active zone ---
+#property indicator_label7  "ProximalLevel"
+#property indicator_type7   DRAW_NONE
+#property indicator_label8  "DistalLevel"
+#property indicator_type8   DRAW_NONE
 
 
 #include <AAI_Include_Settings.mqh>
@@ -33,13 +37,15 @@
 SAlfred Alfred;
 int hATR = INVALID_HANDLE;
 
-// --- Declaring the six data buffers ---
+// --- Declaring the data buffers ---
 double zoneStatusBuffer[];
 double magnetLevelBuffer[];
 double zoneStrengthBuffer[];
 double zoneFreshnessBuffer[];
 double zoneVolumeBuffer[];
-double zoneLiquidityBuffer[]; // Buffer for liquidity grab status
+double zoneLiquidityBuffer[];
+double proximalLevelBuffer[]; // New buffer for proximal price
+double distalLevelBuffer[];   // New buffer for distal price
 
 // --- Mitigated zones tracker ---
 string g_mitigated_zones[];
@@ -55,7 +61,7 @@ struct ZoneAnalysis
    int      strengthScore;
    bool     isFresh;
    bool     hasVolume;
-   bool     hasLiquidityGrab; // Flag for liquidity grab
+   bool     hasLiquidityGrab;
    datetime time;
 };
 
@@ -65,6 +71,7 @@ struct ZoneAnalysis
 //+------------------------------------------------------------------+
 int OnInit()
 {
+   // --- Default Settings ---
    Alfred.supdemZoneLookback         = 50;
    Alfred.supdemZoneDurationBars     = 100;
    Alfred.supdemMinImpulseMovePips   = 20.0;
@@ -79,6 +86,7 @@ int OnInit()
    Alfred.supdemTimeDecayBars        = 20;
    Alfred.supdemEnableMagnetForecast = true;
 
+   // --- Setup Buffers ---
    SetIndexBuffer(0, zoneStatusBuffer, INDICATOR_DATA);
    ArraySetAsSeries(zoneStatusBuffer, true);
    SetIndexBuffer(1, magnetLevelBuffer, INDICATOR_DATA);
@@ -89,16 +97,24 @@ int OnInit()
    ArraySetAsSeries(zoneFreshnessBuffer, true);
    SetIndexBuffer(4, zoneVolumeBuffer, INDICATOR_DATA);
    ArraySetAsSeries(zoneVolumeBuffer, true);
-   // --- Set up the liquidity buffer ---
    SetIndexBuffer(5, zoneLiquidityBuffer, INDICATOR_DATA);
    ArraySetAsSeries(zoneLiquidityBuffer, true);
+   // --- Setup New Price Level Buffers ---
+   SetIndexBuffer(6, proximalLevelBuffer, INDICATOR_DATA);
+   ArraySetAsSeries(proximalLevelBuffer, true);
+   SetIndexBuffer(7, distalLevelBuffer, INDICATOR_DATA);
+   ArraySetAsSeries(distalLevelBuffer, true);
 
+
+   // --- Initialize all buffers ---
    ArrayInitialize(zoneStatusBuffer, 0.0);
    ArrayInitialize(magnetLevelBuffer, 0.0);
    ArrayInitialize(zoneStrengthBuffer, 0.0);
    ArrayInitialize(zoneFreshnessBuffer, 0.0);
    ArrayInitialize(zoneVolumeBuffer, 0.0);
-   ArrayInitialize(zoneLiquidityBuffer, 0.0); // Default to no grab
+   ArrayInitialize(zoneLiquidityBuffer, 0.0);
+   ArrayInitialize(proximalLevelBuffer, 0.0); // Initialize new buffer
+   ArrayInitialize(distalLevelBuffer, 0.0);   // Initialize new buffer
 
    hATR = iATR(_Symbol, _Period, 14);
    if(hATR == INVALID_HANDLE){ Print("Error creating ATR handle"); return(INIT_FAILED); }
@@ -136,6 +152,8 @@ int OnCalculate(const int rates_total,
    double liveFreshness = 0.0;
    double liveVolume = 0.0;
    double liveLiquidity = 0.0;
+   double liveProximal = 0.0; // Variable to hold current proximal level
+   double liveDistal = 0.0;   // Variable to hold current distal level
    double closestDist = DBL_MAX;
 
    string zoneNames[] = {
@@ -144,6 +162,7 @@ int OnCalculate(const int rates_total,
       "DZone_D1","SZone_D1"
    };
 
+   // Find the active zone and extract its data
    for(int i = 0; i < ArraySize(zoneNames); i++)
    {
       string zName = zoneNames[i];
@@ -152,20 +171,38 @@ int OnCalculate(const int rates_total,
          double p1=ObjectGetDouble(0,zName,OBJPROP_PRICE,0), p2=ObjectGetDouble(0,zName,OBJPROP_PRICE,1);
          if(currentPrice >= MathMin(p1,p2) && currentPrice <= MathMax(p1,p2))
          {
+            // Set zone status
             if(StringFind(zName, "DZone") >= 0) liveZoneStatus = 1; else liveZoneStatus = -1;
+            
+            // Extract data from tooltip
             string tooltip = ObjectGetString(0, zName, OBJPROP_TOOLTIP);
             string parts[];
-            if(StringSplit(tooltip, ';', parts) == 4) // Expects 4 parts: score;freshness;volume;liquidity
+            if(StringSplit(tooltip, ';', parts) == 4)
             {
                liveStrengthScore = (int)StringToInteger(parts[0]);
                liveFreshness = (double)StringToInteger(parts[1]);
                liveVolume = (double)StringToInteger(parts[2]);
                liveLiquidity = (double)StringToInteger(parts[3]);
             }
+            
+            // NEW: Extract price levels directly from the zone object
+            // For a Demand zone, proximal is the top, distal is the bottom.
+            // For a Supply zone, proximal is the bottom, distal is the top.
+            if(liveZoneStatus == 1) // Demand
+            {
+               liveProximal = MathMax(p1, p2);
+               liveDistal = MathMin(p1, p2);
+            }
+            else // Supply
+            {
+               liveProximal = MathMin(p1, p2);
+               liveDistal = MathMax(p1, p2);
+            }
          }
       }
    }
 
+   // Find the closest magnet line
    for(int i = 0; i < ArraySize(zoneNames); i++)
    {
       string magnetName = "MagnetLine_" + zoneNames[i];
@@ -177,22 +214,17 @@ int OnCalculate(const int rates_total,
       }
    }
 
+   // Populate all buffers for all bars (for EA access)
    for(int i = rates_total - 1; i >= 0; i--)
    {
-      zoneStatusBuffer[i] = liveZoneStatus;
-      magnetLevelBuffer[i] = liveMagnetLevel;
-      zoneStrengthBuffer[i] = liveStrengthScore;
+      zoneStatusBuffer[i]    = liveZoneStatus;
+      magnetLevelBuffer[i]   = liveMagnetLevel;
+      zoneStrengthBuffer[i]  = liveStrengthScore;
       zoneFreshnessBuffer[i] = liveFreshness;
-      zoneVolumeBuffer[i] = liveVolume;
+      zoneVolumeBuffer[i]    = liveVolume;
       zoneLiquidityBuffer[i] = liveLiquidity;
-   }
-
-   static datetime lastPrintTime = 0;
-   if(TimeCurrent() != lastPrintTime)
-   {
-      PrintFormat("AAI_ZoneEngine DEBUG | Status:%d | Strength:%d | Fresh:%.0f | Volume:%.0f | Liq:%.0f",
-                  liveZoneStatus, liveStrengthScore, liveFreshness, liveVolume, liveLiquidity);
-      lastPrintTime = TimeCurrent();
+      proximalLevelBuffer[i] = liveProximal; // Populate new buffer
+      distalLevelBuffer[i]   = liveDistal;   // Populate new buffer
    }
 
    return(rates_total);
@@ -368,11 +400,9 @@ void DrawRect(string name, datetime t1, double p1, datetime t2, double p2, color
    ObjectSetInteger(0,name,OBJPROP_WIDTH,   borderOnly ? 3 : 1);
    ObjectSetInteger(0,name,OBJPROP_BACK,    true);
    
-   // Store data in tooltip: "score;freshness;volume;liquidity"
    string tooltip = (string)analysis.strengthScore + ";" + (string)(analysis.isFresh ? 1 : 0) + ";" + (string)(analysis.hasVolume ? 1 : 0) + ";" + (string)(analysis.hasLiquidityGrab ? 1 : 0);
    ObjectSetString(0, name, OBJPROP_TOOLTIP, tooltip);
    
-   // Update visual text
    string fresh_prefix = analysis.isFresh ? "★ " : "";
    string liq_prefix = analysis.hasLiquidityGrab ? "$ " : "";
    string volume_suffix = analysis.hasVolume ? " (V)" : "";
@@ -414,13 +444,12 @@ bool HasVolumeConfirmation(ENUM_TIMEFRAMES tf, int bar_index, int num_candles)
 bool HasLiquidityGrab(ENUM_TIMEFRAMES tf, int bar_index, bool isDemandZone)
 {
    MqlRates rates[];
-   int lookback = 10; // How far back to look for a swing high/low
+   int lookback = 10;
    if(CopyRates(_Symbol, tf, bar_index, lookback, rates) < lookback) return false;
    ArraySetAsSeries(rates, true);
    
    double grab_candle_wick = isDemandZone ? rates[0].low : rates[0].high;
    
-   // Find the highest high / lowest low in the lookback period (excluding the grab candle itself)
    double target_liquidity_level = isDemandZone ? rates[1].low : rates[1].high;
    for(int i = 2; i < lookback; i++)
    {
@@ -434,7 +463,6 @@ bool HasLiquidityGrab(ENUM_TIMEFRAMES tf, int bar_index, bool isDemandZone)
       }
    }
    
-   // Check if the grab candle's wick went past the liquidity level
    if(isDemandZone)
    {
       return grab_candle_wick < target_liquidity_level;
