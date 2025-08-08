@@ -1,13 +1,14 @@
 //+------------------------------------------------------------------+
-//|                       AlfredSupDemCore™                         |
-//|          v1.5 - UPGRADED with Liquidity Grab Engine              |
-//| (Detects stop hunts to validate high-quality zones)              |
+//|                   AAI_Indicator_ZoneEngine.mq5                   |
+//|          v2.0 - UPGRADED with Liquidity Grab Engine              |
+//|      (Detects stop hunts to validate high-quality zones)         |
+//|              Copyright 2025, AlfredAI Project                    |
 //+------------------------------------------------------------------+
 #property indicator_chart_window
 #property strict
-#property version "1.5"
+#property version "2.0"
 
-// --- UPGRADED: Six data buffers for exporting live status ---
+// --- Six data buffers for exporting live status ---
 #property indicator_buffers 6
 #property indicator_plots   6
 
@@ -21,24 +22,24 @@
 #property indicator_type4   DRAW_NONE
 #property indicator_label5  "ZoneVolume"
 #property indicator_type5   DRAW_NONE
-// --- NEW Buffer 5: Liquidity Grab Status (1=Confirmed, 0=Not) ---
+// --- Buffer 5: Liquidity Grab Status (1=Confirmed, 0=Not) ---
 #property indicator_label6  "ZoneLiquidity"
 #property indicator_type6   DRAW_NONE
 
 
-#include <AlfredSettings.mqh>
+#include <AAI_Include_Settings.mqh>
 
 // --- Global instance of settings ---
 SAlfred Alfred;
 int hATR = INVALID_HANDLE;
 
-// --- UPGRADED: Declaring the six data buffers ---
+// --- Declaring the six data buffers ---
 double zoneStatusBuffer[];
 double magnetLevelBuffer[];
 double zoneStrengthBuffer[];
 double zoneFreshnessBuffer[];
 double zoneVolumeBuffer[];
-double zoneLiquidityBuffer[]; // NEW: Buffer for liquidity grab status
+double zoneLiquidityBuffer[]; // Buffer for liquidity grab status
 
 // --- Mitigated zones tracker ---
 string g_mitigated_zones[];
@@ -54,7 +55,7 @@ struct ZoneAnalysis
    int      strengthScore;
    bool     isFresh;
    bool     hasVolume;
-   bool     hasLiquidityGrab; // NEW: Flag for liquidity grab
+   bool     hasLiquidityGrab; // Flag for liquidity grab
    datetime time;
 };
 
@@ -88,7 +89,7 @@ int OnInit()
    ArraySetAsSeries(zoneFreshnessBuffer, true);
    SetIndexBuffer(4, zoneVolumeBuffer, INDICATOR_DATA);
    ArraySetAsSeries(zoneVolumeBuffer, true);
-   // --- NEW: Set up the liquidity buffer ---
+   // --- Set up the liquidity buffer ---
    SetIndexBuffer(5, zoneLiquidityBuffer, INDICATOR_DATA);
    ArraySetAsSeries(zoneLiquidityBuffer, true);
 
@@ -134,7 +135,7 @@ int OnCalculate(const int rates_total,
    int liveStrengthScore = 0;
    double liveFreshness = 0.0;
    double liveVolume = 0.0;
-   double liveLiquidity = 0.0; // NEW
+   double liveLiquidity = 0.0;
    double closestDist = DBL_MAX;
 
    string zoneNames[] = {
@@ -154,12 +155,12 @@ int OnCalculate(const int rates_total,
             if(StringFind(zName, "DZone") >= 0) liveZoneStatus = 1; else liveZoneStatus = -1;
             string tooltip = ObjectGetString(0, zName, OBJPROP_TOOLTIP);
             string parts[];
-            if(StringSplit(tooltip, ';', parts) == 4) // UPGRADED: Expects 4 parts
+            if(StringSplit(tooltip, ';', parts) == 4) // Expects 4 parts: score;freshness;volume;liquidity
             {
                liveStrengthScore = (int)StringToInteger(parts[0]);
                liveFreshness = (double)StringToInteger(parts[1]);
                liveVolume = (double)StringToInteger(parts[2]);
-               liveLiquidity = (double)StringToInteger(parts[3]); // NEW
+               liveLiquidity = (double)StringToInteger(parts[3]);
             }
          }
       }
@@ -183,13 +184,13 @@ int OnCalculate(const int rates_total,
       zoneStrengthBuffer[i] = liveStrengthScore;
       zoneFreshnessBuffer[i] = liveFreshness;
       zoneVolumeBuffer[i] = liveVolume;
-      zoneLiquidityBuffer[i] = liveLiquidity; // NEW
+      zoneLiquidityBuffer[i] = liveLiquidity;
    }
 
    static datetime lastPrintTime = 0;
    if(TimeCurrent() != lastPrintTime)
    {
-      PrintFormat("AlfredSupDemCore DEBUG | Status:%d | Strength:%d | Fresh:%.0f | Volume:%.0f | Liq:%.0f",
+      PrintFormat("AAI_ZoneEngine DEBUG | Status:%d | Strength:%d | Fresh:%.0f | Volume:%.0f | Liq:%.0f",
                   liveZoneStatus, liveStrengthScore, liveFreshness, liveVolume, liveLiquidity);
       lastPrintTime = TimeCurrent();
    }
@@ -280,7 +281,7 @@ void DrawZones(ENUM_TIMEFRAMES tf, string suffix, color clrD, color clrS, bool i
 }
 
 //+------------------------------------------------------------------+
-//| Core Zone Finding and Scoring Logic (UPGRADED)                   |
+//| Core Zone Finding and Scoring Logic                              |
 //+------------------------------------------------------------------+
 ZoneAnalysis FindZone(ENUM_TIMEFRAMES tf, bool isDemand)
 {
@@ -309,7 +310,6 @@ ZoneAnalysis FindZone(ENUM_TIMEFRAMES tf, bool isDemand)
       analysis.impulseStrength = MathAbs(rates[i-1].close - rates[i].open);
       analysis.isFresh = IsZoneFresh(GetZoneID(isDemand ? "DZone_" : "SZone_", tf, analysis.time));
       analysis.hasVolume = HasVolumeConfirmation(tf, i, 1);
-      // NEW: Check for liquidity grab
       analysis.hasLiquidityGrab = HasLiquidityGrab(tf, i + analysis.baseCandles, isDemand);
       analysis.strengthScore = CalculateZoneStrength(analysis, tf);
       
@@ -320,7 +320,7 @@ ZoneAnalysis FindZone(ENUM_TIMEFRAMES tf, bool isDemand)
 }
 
 //+------------------------------------------------------------------+
-//| Calculates a zone's strength score (UPGRADED)                    |
+//| Calculates a zone's strength score                               |
 //+------------------------------------------------------------------+
 int CalculateZoneStrength(const ZoneAnalysis &zone, ENUM_TIMEFRAMES tf)
 {
@@ -349,14 +349,13 @@ int CalculateZoneStrength(const ZoneAnalysis &zone, ENUM_TIMEFRAMES tf)
 
     int freshnessBonus = zone.isFresh ? 2 : 0;
     int volumeBonus = zone.hasVolume ? 2 : 0;
-    // NEW: Add liquidity grab bonus (high value)
     int liquidityBonus = zone.hasLiquidityGrab ? 3 : 0;
 
     return(MathMin(10, explosiveScore + consolidationScore + freshnessBonus + volumeBonus + liquidityBonus));
 }
 
 //+------------------------------------------------------------------+
-//| Rectangle drawer (UPGRADED to store more data)                   |
+//| Rectangle drawer (stores data in tooltip)                        |
 //+------------------------------------------------------------------+
 void DrawRect(string name, datetime t1, double p1, datetime t2, double p2, color clr, bool borderOnly, const ZoneAnalysis &analysis)
 {
@@ -411,7 +410,7 @@ bool HasVolumeConfirmation(ENUM_TIMEFRAMES tf, int bar_index, int num_candles)
    return (total_volume > avg_volume * 1.5);
 }
 
-// --- NEW FUNCTION FOR LIQUIDITY GRAB DETECTION ---
+// --- FUNCTION FOR LIQUIDITY GRAB DETECTION ---
 bool HasLiquidityGrab(ENUM_TIMEFRAMES tf, int bar_index, bool isDemandZone)
 {
    MqlRates rates[];
