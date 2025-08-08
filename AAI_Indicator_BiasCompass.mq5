@@ -1,15 +1,17 @@
 //+------------------------------------------------------------------+
-//|                           AlfredCompass™                         |
-//|                 v1.14 (Visual Toggle Added)                      |
-//| (ADDED: Input to show/hide on-chart visuals)                     |
+//|                  AAI_Indicator_BiasCompass.mq5                   |
+//|                 v2.0 (Visual Toggle Added)                       |
+//|        (Determines multi-timeframe directional bias)             |
+//|              Copyright 2025, AlfredAI Project                    |
 //+------------------------------------------------------------------+
 #property indicator_chart_window
 #property strict
+#property version "2.0"
 
-// --- NEW INPUT ---
+// --- Input for visuals ---
 input bool ShowOnChartVisuals = false; // Toggle for the on-chart arrow and text
 
-// Two buffers for stable Bias and Confidence output
+// --- Two buffers for Bias and Confidence output ---
 #property indicator_buffers 2
 #property indicator_plots   2
 
@@ -22,7 +24,7 @@ double BiasBuffer[];
 double ConfidenceBuffer[];
 
 
-#include <AlfredSettings.mqh>
+#include <AAI_Include_Settings.mqh>
 
 // --- Enums for State Management
 enum ENUM_BIAS
@@ -32,7 +34,7 @@ enum ENUM_BIAS
     BIAS_NEUTRAL
 };
 
-// --- Globals for Smoothing Logic (Preserved but bypassed for output) ---
+// --- Globals ---
 SAlfred Alfred;
 ENUM_BIAS g_confirmedBias = BIAS_NEUTRAL;
 int       g_confirmedConfidence = 50;
@@ -41,7 +43,7 @@ ENUM_BIAS g_pendingBias = BIAS_NEUTRAL;
 int       g_confirmationCount = 0;
 datetime  g_lastBarTime = 0;
 
-// reference timeframes
+// --- Reference timeframes for analysis ---
 ENUM_TIMEFRAMES TFList[] = { PERIOD_M15, PERIOD_H1, PERIOD_H4 };
 
 //+------------------------------------------------------------------+
@@ -49,13 +51,12 @@ ENUM_TIMEFRAMES TFList[] = { PERIOD_M15, PERIOD_H1, PERIOD_H4 };
 //+------------------------------------------------------------------+
 int OnInit()
 {
-   // --- Start: Manually set defaults (replaces InitAlfredDefaults) ---
+   // --- Manually set defaults ---
    Alfred.enableCompass              = true;
    Alfred.compassYOffset             = 20;
    Alfred.fontSize                   = 12;
-   // --- End: Manually set defaults ---
 
-   // Setup indicator buffers
+   // --- Setup indicator buffers ---
    SetIndexBuffer(0, BiasBuffer, INDICATOR_DATA);
    PlotIndexSetInteger(0, PLOT_DRAW_BEGIN, 1);
    ArrayInitialize(BiasBuffer, 0.0);
@@ -78,7 +79,7 @@ void OnDeinit(const int reason)
 
 
 //+------------------------------------------------------------------+
-//| Main iteration with revised logic                                |
+//| Main calculation loop                                            |
 //+------------------------------------------------------------------+
 int OnCalculate(const int rates_total,
                 const int prev_calculated,
@@ -113,8 +114,12 @@ int OnCalculate(const int rates_total,
    BiasBuffer[bar] = biasValue;
    ConfidenceBuffer[bar] = confidenceValue;
    
-   BiasBuffer[bar-1] = biasValue;
-   ConfidenceBuffer[bar-1] = confidenceValue;
+   // Backfill previous bar to ensure data is available for other indicators
+   if(bar > 0)
+   {
+      BiasBuffer[bar-1] = biasValue;
+      ConfidenceBuffer[bar-1] = confidenceValue;
+   }
 
    // --- 3. Update visuals with the same RAW data (if enabled) ---
    if(ShowOnChartVisuals)
@@ -123,12 +128,11 @@ int OnCalculate(const int rates_total,
    }
    else
    {
-      // If visuals are disabled, make sure to clean them up once
+      // If visuals are disabled, make sure to clean them up
       ObjectsDeleteAll(0, "Compass");
    }
 
-
-   // --- 4. Original smoothing logic (preserved but unused for output) ---
+   // --- 4. Smoothing logic (preserved but not used for buffer output) ---
    if(time[bar] != g_lastBarTime)
    {
       g_lastBarTime = time[bar];
@@ -146,7 +150,7 @@ int OnCalculate(const int rates_total,
 }
 
 //+------------------------------------------------------------------+
-//| Updates all chart objects (REVISED to accept parameters)         |
+//| Updates all chart objects                                        |
 //+------------------------------------------------------------------+
 void UpdateChartVisuals(datetime barTime, double barHigh, ENUM_BIAS bias, int confidence, bool conflict)
 {
@@ -181,7 +185,7 @@ void UpdateChartVisuals(datetime barTime, double barHigh, ENUM_BIAS bias, int co
         if(ObjectFind(0, warnObj) < 0) ObjectCreate(0, warnObj, OBJ_TEXT, 0, 0, 0);
         ObjectSetInteger(0, warnObj, OBJPROP_FONTSIZE, 10);
         ObjectSetInteger(0, warnObj, OBJPROP_COLOR, clrRed);
-        ObjectSetString(0, warnObj, OBJPROP_TEXT, "⚠️ Conflict with MagnetHUD");
+        ObjectSetString(0, warnObj, OBJPROP_TEXT, "⚠️ Conflict with ZoneEngine Magnet");
         ObjectSetInteger(0, warnObj, OBJPROP_ANCHOR, ANCHOR_LOWER);
         ObjectMove(0, warnObj, 0, barTime, price_anchor + (Alfred.compassYOffset + 38) * _Point);
     }
@@ -193,7 +197,7 @@ void UpdateChartVisuals(datetime barTime, double barHigh, ENUM_BIAS bias, int co
 
 
 //+------------------------------------------------------------------+
-//| Calculate RAW Multi-TF bias (Original Logic, Unchanged)          |
+//| Calculate RAW Multi-TF bias                                      |
 //+------------------------------------------------------------------+
 int GetRawCompassBias(bool &conflict, string &biasText)
 {
@@ -237,7 +241,7 @@ int GetRawCompassBias(bool &conflict, string &biasText)
 }
 
 //+------------------------------------------------------------------+
-//| Grab Magnet direction from SupDemCore (Unchanged)                |
+//| Grab Magnet direction from ZoneEngine                            |
 //+------------------------------------------------------------------+
 string GetMagnetDirection()
 {
@@ -247,7 +251,7 @@ string GetMagnetDirection()
 }
 
 //+------------------------------------------------------------------+
-//| Zone reader (as in SupDemCore) (Unchanged)                       |
+//| Zone reader (relies on ZoneEngine objects)                       |
 //+------------------------------------------------------------------+
 double GetTFMagnet(ENUM_TIMEFRAMES tf,
                    string &direction,
@@ -255,7 +259,7 @@ double GetTFMagnet(ENUM_TIMEFRAMES tf,
                    string &eta)
 {
    string dZones[] = {"DZone_LTF","DZone_H1","DZone_H4","DZone_D1"};
-   string sZones[] = {"SZone_LTF","SZone_H1","SZone_H4","DZone_D1"};
+   string sZones[] = {"SZone_LTF","SZone_H1","SZone_H4","SZone_D1"};
    double scoreD=-DBL_MAX, scoreS=-DBL_MAX, bestD=EMPTY_VALUE, bestS=EMPTY_VALUE;
 
    for(int i=0; i<ArraySize(dZones); i++)
@@ -290,7 +294,7 @@ double GetTFMagnet(ENUM_TIMEFRAMES tf,
 }
 
 //+------------------------------------------------------------------+
-//| --- Helper Functions --- (Unchanged)                             |
+//| --- Helper Functions ---                                         |
 //+------------------------------------------------------------------+
 ENUM_BIAS TextToBias(string biasText)
 {
