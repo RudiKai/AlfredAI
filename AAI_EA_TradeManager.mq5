@@ -1,12 +1,12 @@
 //+------------------------------------------------------------------+
 //|                     AAI_EA_TradeManager.mq5                      |
-//|               v2.1 - Brain Integrated Entry Logic                |
+//|               v2.3 - Enhanced Trade Journaling                   |
 //|         (Takes trade signals from AAI_Indicator_SignalBrain)     |
 //|              Copyright 2025, AlfredAI Project                    |
 //+------------------------------------------------------------------+
 #property strict
-#property version   "2.1"
-#property description "Manages trades based on AlfredAI signals."
+#property version   "2.3"
+#property description "Manages trades based on AlfredAI signals with enhanced journaling."
 
 #include <Trade\Trade.mqh>
 
@@ -16,11 +16,26 @@
 #define EVT_EXIT  "[EXIT]"
 #define EVT_TS    "[TS]"
 
+//--- Helper Enums (copied from SignalBrain for decoding)
+enum ENUM_REASON_CODE
+{
+    REASON_NONE,
+    REASON_BUY_LIQ_GRAB_ALIGNED,     // R1
+    REASON_SELL_LIQ_GRAB_ALIGNED,    // R2
+    REASON_NO_ZONE,                  // R3
+    REASON_LOW_ZONE_STRENGTH,        // R4
+    REASON_BIAS_CONFLICT             // R5
+};
+
 //--- EA Inputs
 input int      MinConfidenceToTrade = 13;      // Min confidence score (0-20) to open a new trade
 input double   LotSize              = 0.10;   // Fixed lot size for now
 input ulong    MagicNumber          = 1337;   // Magic for this EA
-input ENUM_TIMEFRAMES SignalTimeframe = PERIOD_CURRENT; // Timeframe for the SignalBrain to analyze
+input ENUM_TIMEFRAMES SignalTimeframe = PERIOD_CURRENT; // Timeframe for SignalBrain & ZoneEngine to analyze
+
+//--- Dynamic SL/TP Inputs ---
+input int      StopLossBufferPips   = 5;      // Pips to add as a buffer to the zone's distal line for SL
+input double   RiskRewardRatio      = 1.5;    // Risk:Reward ratio for calculating Take Profit
 
 //--- Trade Management Inputs
 input int      StartHour          = 1;      // Session start hour (local)
@@ -38,6 +53,7 @@ input bool     EnableLogging      = true;   // Verbose logging
 CTrade    trade;
 double    pipValue;
 string    symbolName;
+double    point;
 
 //+------------------------------------------------------------------+
 //| Expert initialization                                           |
@@ -45,12 +61,11 @@ string    symbolName;
 int OnInit()
   {
    symbolName = _Symbol;
+   point = SymbolInfoDouble(symbolName, SYMBOL_POINT);
    trade.SetExpertMagicNumber(MagicNumber);
 
-   // compute pip-value
-   pipValue = SymbolInfoDouble(symbolName, SYMBOL_POINT) *
-              ((SymbolInfoInteger(symbolName, SYMBOL_DIGITS) % 2)!=0 ? 10 : 1);
-   if(pipValue<=0.0)
+   pipValue = point * ((SymbolInfoInteger(symbolName, SYMBOL_DIGITS) % 2 != 0) ? 10 : 1);
+   if(pipValue <= 0.0)
      {
       PrintFormat("%s Failed to compute pip value for %s", EVT_INIT, symbolName);
       return(INIT_FAILED);
@@ -58,8 +73,9 @@ int OnInit()
 
    if(EnableLogging)
      {
-      PrintFormat("%s AAI_EA_TradeManager initialized for %s", EVT_INIT, symbolName);
+      PrintFormat("%s AAI_EA_TradeManager v2.3 initialized for %s", EVT_INIT, symbolName);
       PrintFormat("%s Minimum confidence to trade: %d", EVT_INIT, MinConfidenceToTrade);
+      PrintFormat("%s Dynamic SL Buffer: %d pips | RR Ratio: 1:%.2f", EVT_INIT, StopLossBufferPips, RiskRewardRatio);
      }
    return(INIT_SUCCEEDED);
   }
@@ -78,9 +94,8 @@ void OnDeinit(const int reason)
 void OnTick()
   {
     static datetime lastBarTime = 0;
-    datetime nowSrv = TimeCurrent(); // Use TimeCurrent for more reliable new bar detection
+    datetime nowSrv = TimeCurrent();
     
-    // Check for new bar on the signal timeframe
     if(iTime(_Symbol, SignalTimeframe, 0) == lastBarTime)
       return;
     lastBarTime = iTime(_Symbol, SignalTimeframe, 0);
@@ -98,8 +113,6 @@ void OnTick()
         inSession  ? "YES" : "NO"
       );
       
-    // --- Main Logic Flow ---
-    // Only check for new trades if no position is currently open for this symbol
     if(!PositionSelect(_Symbol))
     {
       CheckForNewTrades(inSession);
@@ -109,7 +122,7 @@ void OnTick()
   }
   
 //+------------------------------------------------------------------+
-//| Check & execute new entries based on SignalBrain                 |
+//| Check & execute new entries based on SignalBrain & ZoneEngine    |
 //+------------------------------------------------------------------+
 void CheckForNewTrades(bool inSession)
   {
@@ -121,44 +134,64 @@ void CheckForNewTrades(bool inSession)
 
    //--- 1. Fetch latest data from AAI_Indicator_SignalBrain ---
    double brain_data[4]; // 0:Signal, 1:Confidence, 2:ReasonCode, 3:ZoneTF
-   // We check the closed bar (index 1) for a stable signal
    if(CopyBuffer(iCustom(_Symbol, SignalTimeframe, "AAI_Indicator_SignalBrain.ex5"), 0, 1, 4, brain_data) < 4)
    {
       PrintFormat("%s ❌ Could not copy data from SignalBrain indicator.", EVT_BAR);
       return;
    }
    
-   int signal     = (int)brain_data[0];
-   int confidence = (int)brain_data[1];
+   int signal       = (int)brain_data[0];
+   int confidence   = (int)brain_data[1];
+   ENUM_REASON_CODE reasonCode = (ENUM_REASON_CODE)brain_data[2];
    
    if(EnableLogging)
-      PrintFormat("   %s Brain Signal: %d, Confidence: %d", EVT_BAR, signal, confidence);
+      PrintFormat("   %s Brain Signal: %d, Confidence: %d, Reason: %s", EVT_BAR, signal, confidence, ReasonCodeToShortString(reasonCode));
 
    //--- 2. Check Entry Conditions ---
    if(signal != 0 && confidence >= MinConfidenceToTrade)
    {
+      //--- 3. Fetch Zone Levels for SL/TP from AAI_Indicator_ZoneEngine ---
+      double zone_levels[2]; // 0: Proximal, 1: Distal
+      if(CopyBuffer(iCustom(_Symbol, SignalTimeframe, "AAI_Indicator_ZoneEngine.ex5"), 6, 1, 2, zone_levels) < 2 || zone_levels[1] == 0.0)
+      {
+         PrintFormat("%s ❌ Could not copy valid zone levels from ZoneEngine. Aborting trade.", EVT_ENTRY);
+         return;
+      }
+      double distal_level = zone_levels[1];
+
       double ask = SymbolInfoDouble(symbolName, SYMBOL_ASK);
       double bid = SymbolInfoDouble(symbolName, SYMBOL_BID);
-      
-      // NOTE: SL/TP are 0 for now. This will be replaced in the next phase
-      // with dynamic levels from the ZoneEngine.
       double sl = 0;
       double tp = 0;
-      
-      string comment = "AAI | Conf " + (string)confidence;
+      double sl_buffer_points = StopLossBufferPips * pipValue;
 
-      //--- 3. Execute Trade ---
+      // NEW: Enhanced trade comment
+      string comment = StringFormat("AAI | C%d | R%d", confidence, reasonCode);
+
+      //--- 4. Execute Trade with Dynamic SL/TP ---
       if(signal == 1) // BUY Signal
       {
+         sl = distal_level - sl_buffer_points;
+         double risk_points = ask - sl;
+         if(risk_points <= 0) { PrintFormat("%s Invalid risk for BUY. Aborting.", EVT_ENTRY); return; }
+         tp = ask + risk_points * RiskRewardRatio;
+         
          if(trade.Buy(LotSize, symbolName, ask, sl, tp, comment))
-            PrintFormat("%s Signal:BUY → Executed BUY @%.5f | Confidence: %d", EVT_ENTRY, trade.ResultPrice(), confidence);
+            // NEW: Enhanced log message
+            PrintFormat("%s Signal:BUY → Executed @%.5f | SL:%.5f TP:%.5f | Conf: %d | Reason: %s", EVT_ENTRY, trade.ResultPrice(), sl, tp, confidence, ReasonCodeToFullString(reasonCode));
          else
             PrintFormat("%s BUY failed (Err:%d %s)", EVT_ENTRY, trade.ResultRetcode(), trade.ResultComment());
       }
       else if(signal == -1) // SELL Signal
       {
+         sl = distal_level + sl_buffer_points;
+         double risk_points = sl - bid;
+         if(risk_points <= 0) { PrintFormat("%s Invalid risk for SELL. Aborting.", EVT_ENTRY); return; }
+         tp = bid - risk_points * RiskRewardRatio;
+
          if(trade.Sell(LotSize, symbolName, bid, sl, tp, comment))
-            PrintFormat("%s Signal:SELL → Executed SELL @%.5f | Confidence: %d", EVT_ENTRY, trade.ResultPrice(), confidence);
+            // NEW: Enhanced log message
+            PrintFormat("%s Signal:SELL → Executed @%.5f | SL:%.5f TP:%.5f | Conf: %d | Reason: %s", EVT_ENTRY, trade.ResultPrice(), sl, tp, confidence, ReasonCodeToFullString(reasonCode));
          else
             PrintFormat("%s SELL failed (Err:%d %s)", EVT_ENTRY, trade.ResultRetcode(), trade.ResultComment());
       }
@@ -166,7 +199,7 @@ void CheckForNewTrades(bool inSession)
   }
 
 //+------------------------------------------------------------------+
-//| Manage open positions (Unchanged for now)                        |
+//| Manage open positions (Unchanged)                                |
 //+------------------------------------------------------------------+
 void ManageOpenPositions(const MqlDateTime &loc, bool overnight)
   {
@@ -181,7 +214,6 @@ void ManageOpenPositions(const MqlDateTime &loc, bool overnight)
    double currSL   = PositionGetDouble(POSITION_SL);
    double currPrice= (type==POSITION_TYPE_BUY ? bid : ask);
 
-   // 1) Friday close
    if(loc.day_of_week==FRIDAY && loc.hour>=FridayCloseHour)
      {
       PrintFormat("%s Fri-close → closing #%d", EVT_EXIT, ticket);
@@ -189,7 +221,6 @@ void ManageOpenPositions(const MqlDateTime &loc, bool overnight)
       return;
      }
 
-   // 2) Break-even
    double beDist = BreakEvenPips * pipValue;
    if(type==POSITION_TYPE_BUY && bid-openP>=beDist && (currSL < openP || currSL == 0))
       if(trade.PositionModify(ticket, openP, PositionGetDouble(POSITION_TP)))
@@ -198,12 +229,11 @@ void ManageOpenPositions(const MqlDateTime &loc, bool overnight)
       if(trade.PositionModify(ticket, openP, PositionGetDouble(POSITION_TP)))
          { currSL=openP; PrintFormat("%s BE SELL #%d", EVT_TS, ticket); }
 
-   // 3) Trailing stop
    HandleTrailingStop(ticket, type, openP, currSL, currPrice, overnight);
   }
 
 //+------------------------------------------------------------------+
-//| Trailing-stop logic (Unchanged for now)                          |
+//| Trailing-stop logic (Unchanged)                                  |
 //+------------------------------------------------------------------+
 void HandleTrailingStop(ulong ticket,long type,double openP,double currSL,double currPrice,bool overnight)
   {
@@ -213,7 +243,6 @@ void HandleTrailingStop(ulong ticket,long type,double openP,double currSL,double
    double startDist = TrailingStartPips * pipValue;
    double newSL     = currSL;
 
-   // condition to start trailing
    bool canTrail = (overnight || 
                     (type==POSITION_TYPE_BUY && currPrice-openP>=startDist) ||
                     (type==POSITION_TYPE_SELL && openP-currPrice>=startDist));
@@ -249,4 +278,35 @@ bool IsTradingSession()
 
     return (curMin >= startTotalMin && curMin < endTotalMin);
   }
+  
+//+------------------------------------------------------------------+
+//|           HELPER: Converts Reason Code to String                 |
+//+------------------------------------------------------------------+
+string ReasonCodeToFullString(ENUM_REASON_CODE code)
+{
+    switch(code)
+    {
+        case REASON_BUY_LIQ_GRAB_ALIGNED:  return "Buy signal: Liquidity Grab in Demand Zone with Bias Alignment.";
+        case REASON_SELL_LIQ_GRAB_ALIGNED: return "Sell signal: Liquidity Grab in Supply Zone with Bias Alignment.";
+        case REASON_NO_ZONE:               return "No Zone";
+        case REASON_LOW_ZONE_STRENGTH:     return "Low Zone Strength";
+        case REASON_BIAS_CONFLICT:         return "Bias Conflict";
+        case REASON_NONE:
+        default:                           return "N/A";
+    }
+}
+
+string ReasonCodeToShortString(ENUM_REASON_CODE code)
+{
+    switch(code)
+    {
+        case REASON_BUY_LIQ_GRAB_ALIGNED:  return "BuyLiqGrab";
+        case REASON_SELL_LIQ_GRAB_ALIGNED: return "SellLiqGrab";
+        case REASON_NO_ZONE:               return "NoZone";
+        case REASON_LOW_ZONE_STRENGTH:     return "LowStrength";
+        case REASON_BIAS_CONFLICT:         return "Conflict";
+        case REASON_NONE:
+        default:                           return "None";
+    }
+}
 //+------------------------------------------------------------------+
