@@ -1,10 +1,12 @@
 //+------------------------------------------------------------------+
-//| AlfredInit.mqh — Defaults & Init Function                       |
+//|                       AAI_Include_Init.mqh                       |
+//|                v2.0 - Defaults & Init Function                   |
+//|              Copyright 2025, AlfredAI Project                    |
 //+------------------------------------------------------------------+
-#ifndef __ALFRED_INIT__
-#define __ALFRED_INIT__
+#ifndef __AAI_INCLUDE_INIT__
+#define __AAI_INCLUDE_INIT__
 
-#include <AlfredSettings.mqh>
+#include <AAI_Include_Settings.mqh>
 
 // Call this once from your OnInit()
 void InitAlfredSettings()
@@ -48,7 +50,7 @@ void InitAlfredSettings()
    Alfred.hudXOffset                 = 10;
    Alfred.hudYOffset                 = 10;
 
-   // SupDemCore
+   // ZoneEngine (formerly SupDemCore)
    Alfred.supdemZoneLookback         = 50;
    Alfred.supdemZoneDurationBars     = 100;
    Alfred.supdemMinImpulseMovePips   = 20.0;
@@ -80,4 +82,4 @@ void InitAlfredSettings()
    Alfred.enablePaneTFBias           = true;
 }
 
-#endif // __ALFRED_INIT__
+#endif // __AAI_INCLUDE_INIT__
