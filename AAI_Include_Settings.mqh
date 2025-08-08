@@ -1,8 +1,10 @@
 //+------------------------------------------------------------------+
-//| AlfredSettings.mqh — Central Config                              |
+//|                     AAI_Include_Settings.mqh                     |
+//|                  v2.0 - Central Configuration                    |
+//|              Copyright 2025, AlfredAI Project                    |
 //+------------------------------------------------------------------+
-#ifndef __ALFRED_SETTINGS__
-#define __ALFRED_SETTINGS__
+#ifndef __AAI_INCLUDE_SETTINGS__
+#define __AAI_INCLUDE_SETTINGS__
 
 // Struct for all Alfred settings
 struct SAlfred
@@ -46,7 +48,7 @@ struct SAlfred
    int     hudXOffset;
    int     hudYOffset;
 
-   // SupDemCore
+   // ZoneEngine (formerly SupDemCore)
    int     supdemZoneLookback;
    int     supdemZoneDurationBars;
    double  supdemMinImpulseMovePips;
@@ -81,4 +83,4 @@ struct SAlfred
 // extern declaration for single global instance
 extern SAlfred Alfred;
 
-#endif // __ALFRED_SETTINGS__
+#endif // __AAI_INCLUDE_SETTINGS__
