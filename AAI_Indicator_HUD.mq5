@@ -1,12 +1,14 @@
 //+------------------------------------------------------------------+
-//|                           AlfredHUD™                             |
-//|                 v1.12 (Visual Toggle Added)                      |
-//| (ADDED: Input to show/hide on-chart visuals)                     |
+//|                       AAI_Indicator_HUD.mq5                      |
+//|                 v2.0 (Visual Toggle Added)                       |
+//|      (Provides a simple heads-up display of zone status)         |
+//|              Copyright 2025, AlfredAI Project                    |
 //+------------------------------------------------------------------+
 #property indicator_chart_window
 #property strict
+#property version "2.0"
 
-// --- NEW INPUT ---
+// --- Input for visuals ---
 input bool ShowOnChartVisuals = false; // Toggle for the on-chart text panel
 
 // --- Buffers for data export ---
@@ -15,7 +17,7 @@ input bool ShowOnChartVisuals = false; // Toggle for the on-chart text panel
 
 // --- Dummy buffer ---
 #property indicator_type1   DRAW_NONE
-#property indicator_label1  "AlfredHUD™"
+#property indicator_label1  "AAI_HUD"
 double dummyBuffer[];
 
 // --- Buffers for each timeframe's zone status ---
@@ -39,7 +41,7 @@ double m30ZoneBuffer[];
 #property indicator_label6  "M15_Zone"
 double m15ZoneBuffer[];
 
-#include <AlfredSettings.mqh>
+#include <AAI_Include_Settings.mqh>
 
 SAlfred Alfred;
 int    maHandle = INVALID_HANDLE;
@@ -220,12 +222,12 @@ int OnInit()
 //+------------------------------------------------------------------+
 void OnDeinit(const int reason)
 {
-    ObjectsDeleteAll(0, "AlfredHUD_");
+    ObjectsDeleteAll(0, "AAI_HUD_");
 }
 
 
 //+------------------------------------------------------------------+
-//| Main HUD Loop (REVISED for visual toggle)                        |
+//| Main calculation loop                                            |
 //+------------------------------------------------------------------+
 int OnCalculate(const int rates_total,
                 const int prev_calculated,
@@ -245,7 +247,7 @@ int OnCalculate(const int rates_total,
    double m30_status = (ObjectFind(0, "DZone_M30") >= 0 || ObjectFind(0, "SZone_M30") >= 0) ? 1.0 : 0.0;
    double m15_status = (ObjectFind(0, "DZone_M15") >= 0 || ObjectFind(0, "SZone_M15") >= 0) ? 1.0 : 0.0;
 
-   // --- 2. Backfill the entire buffer history (for the Pane) ---
+   // --- 2. Backfill the entire buffer history (for the Dashboard) ---
    for(int i = rates_total - 1; i >= 0; i--)
    {
       h4ZoneBuffer[i]  = h4_status;
@@ -276,7 +278,7 @@ int OnCalculate(const int rates_total,
          string compass = GetCompassBias(dir, slope);
 
          string display = tfLbl + ": " + dir + " [" + str + "] " + eta + "\n" + compass;
-         string objName = "AlfredHUD_" + tfLbl;
+         string objName = "AAI_HUD_" + tfLbl;
 
          if(ObjectFind(0, objName) < 0)
             ObjectCreate(0, objName, OBJ_LABEL, 0, 0, 0);
@@ -290,8 +292,8 @@ int OnCalculate(const int rates_total,
       }
 
       // draw footer
-      string footerObj  = "AlfredHUD_Footer";
-      string footerText = "🧲 AlfredHUD™ → " + _Symbol;
+      string footerObj  = "AAI_HUD_Footer";
+      string footerText = "🧲 AAI HUD™ → " + _Symbol;
       int footerOffset  = Alfred.hudYOffset + ArraySize(TFList) * lineHeight + 6;
 
       if(ObjectFind(0, footerObj) < 0)
@@ -306,8 +308,8 @@ int OnCalculate(const int rates_total,
    }
    else
    {
-      // If visuals are disabled, make sure to clean them up once
-      ObjectsDeleteAll(0, "AlfredHUD_");
+      // If visuals are disabled, make sure to clean them up
+      ObjectsDeleteAll(0, "AAI_HUD_");
    }
 
    return(rates_total);
