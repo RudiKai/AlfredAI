@@ -1,6 +1,6 @@
 //+------------------------------------------------------------------+
 //|                     AAI_EA_TradeManager.mq5                      |
-//|             v3.4 - Workaround for Compiler Bug                   |
+//|               v3.4 - Final Clean Compile                         |
 //|         (Takes trade signals from AAI_Indicator_SignalBrain)     |
 //|                                                                  |
 //|              Copyright 2025, AlfredAI Project                    |
@@ -159,7 +159,7 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
     {
         if(HistoryDealSelect(trans.deal))
         {
-            if(HistoryDealGetInteger(trans.deal, DEAL_MAGIC) == MagicNumber)
+            if((ulong)HistoryDealGetInteger(trans.deal, DEAL_MAGIC) == MagicNumber)
             {
                 if(HistoryDealGetInteger(trans.deal, DEAL_ENTRY) == DEAL_ENTRY_OUT)
                 {
