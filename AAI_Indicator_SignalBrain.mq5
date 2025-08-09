@@ -1,13 +1,13 @@
 //+------------------------------------------------------------------+
 //|                  AAI_Indicator_SignalBrain.mq5                   |
-//|                        v2.0 (Live Version)                       |
+//|                 v2.4 - Debug Logging Forced ON                   |
 //|          Acts as the confluence and trade signal engine.         |
 //|              Copyright 2025, AlfredAI Project                    |
 //+------------------------------------------------------------------+
 
 #property indicator_chart_window
 #property strict
-#property version "2.0"
+#property version "2.4"
 
 // --- Brain Outputs (Exported via Buffers)
 #property indicator_buffers 4
@@ -33,6 +33,10 @@ double ReasonCodeBuffer[];
 #property indicator_label4  "ZoneTimeframe"
 double ZoneTFBuffer[];
 
+
+//--- Indicator Inputs ---
+input int  MinZoneStrength    = 4;      // Minimum zone strength score (1-10) to consider for a signal
+
 // --- Enums for Clarity
 enum ENUM_TRADE_SIGNAL
 {
@@ -44,8 +48,10 @@ enum ENUM_TRADE_SIGNAL
 enum ENUM_REASON_CODE
 {
     REASON_NONE,
-    REASON_BUY_LIQ_GRAB_ALIGNED,
-    REASON_SELL_LIQ_GRAB_ALIGNED,
+    REASON_BUY_HTF_CONTINUATION,     // Standard Buy: HTF Trend + Zone Pullback
+    REASON_SELL_HTF_CONTINUATION,    // Standard Sell: HTF Trend + Zone Pullback
+    REASON_BUY_LIQ_GRAB_ALIGNED,     // Premium Buy: Std + Liq Grab
+    REASON_SELL_LIQ_GRAB_ALIGNED,    // Premium Sell: Std + Liq Grab
     REASON_NO_ZONE,
     REASON_LOW_ZONE_STRENGTH,
     REASON_BIAS_CONFLICT
@@ -54,7 +60,8 @@ enum ENUM_REASON_CODE
 // --- Constants for Analysis
 const ENUM_TIMEFRAMES HTF = PERIOD_H4;
 const ENUM_TIMEFRAMES LTF = PERIOD_M15;
-const int MIN_ZONE_STRENGTH = 6;
+// --- DEBUG FLAG ---
+const bool EnableDebugLogging = true; // DEBUG: This is now hard-coded to ON for testing.
 
 // --- Globals
 datetime g_lastBarTime = 0;
@@ -110,61 +117,89 @@ int OnCalculate(const int rates_total,
     double zone_engine_data[6]; // 0:Status, 1:Magnet, 2:Strength, 3:Fresh, 4:Vol, 5:Liq
     if(CopyBuffer(iCustom(_Symbol, _Period, "AAI_Indicator_ZoneEngine.ex5"), 0, 0, 6, zone_engine_data) < 6)
     {
-       // If ZoneEngine is not available, cannot proceed.
        return(rates_total);
     }
     
     double zone_status         = zone_engine_data[0];
     double zone_strength       = zone_engine_data[2];
     bool   has_liquidity_grab  = (zone_engine_data[5] > 0.5);
+    
+    double htf_bias_arr[1], ltf_bias_arr[1];
+    CopyBuffer(iCustom(_Symbol, HTF, "AAI_Indicator_BiasCompass.ex5"), 0, 0, 1, htf_bias_arr);
+    CopyBuffer(iCustom(_Symbol, LTF, "AAI_Indicator_BiasCompass.ex5"), 0, 0, 1, ltf_bias_arr);
+    double htf_bias = htf_bias_arr[0];
+    double ltf_bias = ltf_bias_arr[0];
+
+    //--- NEW: Debug Logging ---
+    if(EnableDebugLogging)
+    {
+        string debug_msg = StringFormat("BrainDebug | BarTime: %s | ZoneStatus: %.0f, ZoneStr: %.0f, LiqGrab: %s | HTFBias: %.1f, LTFBias: %.1f",
+                                        TimeToString(time[rates_total-1]),
+                                        zone_status,
+                                        zone_strength,
+                                        has_liquidity_grab ? "true" : "false",
+                                        htf_bias,
+                                        ltf_bias);
+        Print(debug_msg);
+    }
+
 
     //--- 3. Pre-analysis checks (exit conditions)
     if(zone_status == 0)
     {
         reasonCode = REASON_NO_ZONE;
     }
-    else if(zone_strength < MIN_ZONE_STRENGTH)
+    else if(zone_strength < MinZoneStrength)
     {
         reasonCode = REASON_LOW_ZONE_STRENGTH;
     }
     else
     {
         //--- 4. Main analysis logic if pre-checks pass
-        double htf_bias_arr[1], ltf_bias_arr[1];
-        CopyBuffer(iCustom(_Symbol, HTF, "AAI_Indicator_BiasCompass.ex5"), 0, 0, 1, htf_bias_arr);
-        CopyBuffer(iCustom(_Symbol, LTF, "AAI_Indicator_BiasCompass.ex5"), 0, 0, 1, ltf_bias_arr);
         
-        double htf_bias = htf_bias_arr[0];
-        double ltf_bias = ltf_bias_arr[0];
-        
-        // --- Signal Logic ---
-        if(zone_status > 0.5 && ltf_bias > 0.5 && has_liquidity_grab) // Demand Zone & Bullish Bias & Liq Grab
+        // --- Check for Bias Conflict FIRST ---
+        if (htf_bias * ltf_bias < -0.5) 
         {
-            signal = SIGNAL_BUY;
-            reasonCode = REASON_BUY_LIQ_GRAB_ALIGNED;
-        }
-        else if(zone_status < -0.5 && ltf_bias < -0.5 && has_liquidity_grab) // Supply Zone & Bearish Bias & Liq Grab
-        {
-            signal = SIGNAL_SELL;
-            reasonCode = REASON_SELL_LIQ_GRAB_ALIGNED;
-        }
-
-        // --- Confidence Scoring ---
-        confidence = 10; // Base confidence for a valid signal
-        if(htf_bias == ltf_bias)
-        {
-           confidence += 5; // HTF/LTF alignment bonus
+            reasonCode = REASON_BIAS_CONFLICT;
         }
         else
         {
-           confidence -= 5; // HTF/LTF conflict penalty
-           reasonCode = REASON_BIAS_CONFLICT;
-           signal = SIGNAL_NONE; // Invalidate signal on conflict for now
-        }
-        
-        if(has_liquidity_grab)
-        {
-           confidence += 5; // Liquidity grab is a high-confidence event
+            // --- LOGIC PATH 1: A+ Reversal Setup (Highest Confidence) ---
+            if(has_liquidity_grab)
+            {
+                if(zone_status > 0.5 && ltf_bias > 0.5) // Demand Zone + LTF Bullish Bias
+                {
+                    signal = SIGNAL_BUY;
+                    reasonCode = REASON_BUY_LIQ_GRAB_ALIGNED;
+                    confidence = 13; // High base confidence
+                    if (htf_bias > 0.5) confidence += 5; // HTF alignment bonus
+                }
+                else if(zone_status < -0.5 && ltf_bias < -0.5) // Supply Zone + LTF Bearish Bias
+                {
+                    signal = SIGNAL_SELL;
+                    reasonCode = REASON_SELL_LIQ_GRAB_ALIGNED;
+                    confidence = 13; // High base confidence
+                    if (htf_bias < -0.5) confidence += 5; // HTF alignment bonus
+                }
+            }
+            
+            // --- LOGIC PATH 2: HTF Continuation Setup (Standard Confidence) ---
+            // This runs only if the A+ setup was not found
+            if(signal == SIGNAL_NONE)
+            {
+                if(zone_status > 0.5 && htf_bias > 0.5) // Demand Zone & HTF Bullish Trend
+                {
+                    signal = SIGNAL_BUY;
+                    reasonCode = REASON_BUY_HTF_CONTINUATION;
+                    confidence = 8; // Standard base confidence
+                }
+                else if(zone_status < -0.5 && htf_bias < -0.5) // Supply Zone & HTF Bearish Trend
+                {
+                    signal = SIGNAL_SELL;
+                    reasonCode = REASON_SELL_HTF_CONTINUATION;
+                    confidence = 8; // Standard base confidence
+                }
+            }
         }
         
         zoneTimeframe = (int)PeriodSeconds(_Period) / 60;
@@ -172,6 +207,17 @@ int OnCalculate(const int rates_total,
 
     //--- Clamp confidence to the 0-20 range
     confidence = MathMax(0, MathMin(20, confidence));
+    
+    // If confidence is zero, there is no valid signal
+    if(confidence == 0)
+    {
+       signal = SIGNAL_NONE;
+       // Keep the reason code if it was a specific failure (e.g., conflict, no zone)
+       if(reasonCode != REASON_NO_ZONE && reasonCode != REASON_LOW_ZONE_STRENGTH && reasonCode != REASON_BIAS_CONFLICT)
+       {
+          reasonCode = REASON_NONE;
+       }
+    }
 
     //--- 5. Populate indicator buffers
     int bar = rates_total - 1;
