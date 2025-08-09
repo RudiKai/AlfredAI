@@ -1,12 +1,12 @@
 //+------------------------------------------------------------------+
 //|                   AAI_Indicator_ZoneEngine.mq5                   |
-//|        v2.1 - UPGRADED with Price Level Buffer Exports           |
+//|               v2.3 - Tuned Default Impulse Move                  |
 //|      (Detects zones and exports levels for EA consumption)       |
 //|              Copyright 2025, AlfredAI Project                    |
 //+------------------------------------------------------------------+
 #property indicator_chart_window
 #property strict
-#property version "2.1"
+#property version "2.3"
 
 // --- Eight data buffers for exporting live status ---
 #property indicator_buffers 8
@@ -24,12 +24,13 @@
 #property indicator_type5   DRAW_NONE
 #property indicator_label6  "ZoneLiquidity"
 #property indicator_type6   DRAW_NONE
-// --- Buffer 6 & 7: Exporting Proximal and Distal price levels of the active zone ---
 #property indicator_label7  "ProximalLevel"
 #property indicator_type7   DRAW_NONE
 #property indicator_label8  "DistalLevel"
 #property indicator_type8   DRAW_NONE
 
+//--- Indicator Inputs ---
+input double MinImpulseMovePips = 10.0; // TUNED: Default is now more sensitive
 
 #include <AAI_Include_Settings.mqh>
 
@@ -44,8 +45,8 @@ double zoneStrengthBuffer[];
 double zoneFreshnessBuffer[];
 double zoneVolumeBuffer[];
 double zoneLiquidityBuffer[];
-double proximalLevelBuffer[]; // New buffer for proximal price
-double distalLevelBuffer[];   // New buffer for distal price
+double proximalLevelBuffer[];
+double distalLevelBuffer[];
 
 // --- Mitigated zones tracker ---
 string g_mitigated_zones[];
@@ -74,7 +75,7 @@ int OnInit()
    // --- Default Settings ---
    Alfred.supdemZoneLookback         = 50;
    Alfred.supdemZoneDurationBars     = 100;
-   Alfred.supdemMinImpulseMovePips   = 20.0;
+   // Alfred.supdemMinImpulseMovePips is now an input
    Alfred.supdemDemandColorHTF       = clrLightGreen;
    Alfred.supdemDemandColorLTF       = clrGreen;
    Alfred.supdemSupplyColorHTF       = clrHotPink;
@@ -99,7 +100,6 @@ int OnInit()
    ArraySetAsSeries(zoneVolumeBuffer, true);
    SetIndexBuffer(5, zoneLiquidityBuffer, INDICATOR_DATA);
    ArraySetAsSeries(zoneLiquidityBuffer, true);
-   // --- Setup New Price Level Buffers ---
    SetIndexBuffer(6, proximalLevelBuffer, INDICATOR_DATA);
    ArraySetAsSeries(proximalLevelBuffer, true);
    SetIndexBuffer(7, distalLevelBuffer, INDICATOR_DATA);
@@ -113,8 +113,8 @@ int OnInit()
    ArrayInitialize(zoneFreshnessBuffer, 0.0);
    ArrayInitialize(zoneVolumeBuffer, 0.0);
    ArrayInitialize(zoneLiquidityBuffer, 0.0);
-   ArrayInitialize(proximalLevelBuffer, 0.0); // Initialize new buffer
-   ArrayInitialize(distalLevelBuffer, 0.0);   // Initialize new buffer
+   ArrayInitialize(proximalLevelBuffer, 0.0);
+   ArrayInitialize(distalLevelBuffer, 0.0);
 
    hATR = iATR(_Symbol, _Period, 14);
    if(hATR == INVALID_HANDLE){ Print("Error creating ATR handle"); return(INIT_FAILED); }
@@ -152,8 +152,8 @@ int OnCalculate(const int rates_total,
    double liveFreshness = 0.0;
    double liveVolume = 0.0;
    double liveLiquidity = 0.0;
-   double liveProximal = 0.0; // Variable to hold current proximal level
-   double liveDistal = 0.0;   // Variable to hold current distal level
+   double liveProximal = 0.0;
+   double liveDistal = 0.0;
    double closestDist = DBL_MAX;
 
    string zoneNames[] = {
@@ -171,10 +171,8 @@ int OnCalculate(const int rates_total,
          double p1=ObjectGetDouble(0,zName,OBJPROP_PRICE,0), p2=ObjectGetDouble(0,zName,OBJPROP_PRICE,1);
          if(currentPrice >= MathMin(p1,p2) && currentPrice <= MathMax(p1,p2))
          {
-            // Set zone status
             if(StringFind(zName, "DZone") >= 0) liveZoneStatus = 1; else liveZoneStatus = -1;
             
-            // Extract data from tooltip
             string tooltip = ObjectGetString(0, zName, OBJPROP_TOOLTIP);
             string parts[];
             if(StringSplit(tooltip, ';', parts) == 4)
@@ -185,9 +183,6 @@ int OnCalculate(const int rates_total,
                liveLiquidity = (double)StringToInteger(parts[3]);
             }
             
-            // NEW: Extract price levels directly from the zone object
-            // For a Demand zone, proximal is the top, distal is the bottom.
-            // For a Supply zone, proximal is the bottom, distal is the top.
             if(liveZoneStatus == 1) // Demand
             {
                liveProximal = MathMax(p1, p2);
@@ -223,8 +218,8 @@ int OnCalculate(const int rates_total,
       zoneFreshnessBuffer[i] = liveFreshness;
       zoneVolumeBuffer[i]    = liveVolume;
       zoneLiquidityBuffer[i] = liveLiquidity;
-      proximalLevelBuffer[i] = liveProximal; // Populate new buffer
-      distalLevelBuffer[i]   = liveDistal;   // Populate new buffer
+      proximalLevelBuffer[i] = liveProximal;
+      distalLevelBuffer[i]   = liveDistal;
    }
 
    return(rates_total);
@@ -331,7 +326,8 @@ ZoneAnalysis FindZone(ENUM_TIMEFRAMES tf, bool isDemand)
       double impulseEnd = isDemand ? rates[i-1].high : rates[i-1].low;
       double impulseMove = MathAbs(impulseEnd - impulseStart);
       
-      if(impulseMove / _Point < Alfred.supdemMinImpulseMovePips) continue;
+      // Use the new input parameter here
+      if(impulseMove / _Point < MinImpulseMovePips) continue;
 
       analysis.proximal = isDemand ? rates[i].high : rates[i].low;
       analysis.distal = isDemand ? rates[i].low : rates[i].high;
@@ -378,7 +374,6 @@ int CalculateZoneStrength(const ZoneAnalysis &zone, ENUM_TIMEFRAMES tf)
     if(zone.baseCandles == 1) consolidationScore = 5;
     else if(zone.baseCandles <= 3) consolidationScore = 3;
     else consolidationScore = 1;
-
     int freshnessBonus = zone.isFresh ? 2 : 0;
     int volumeBonus = zone.hasVolume ? 2 : 0;
     int liquidityBonus = zone.hasLiquidityGrab ? 3 : 0;
