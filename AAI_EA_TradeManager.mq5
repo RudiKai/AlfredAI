@@ -1,12 +1,12 @@
 //+------------------------------------------------------------------+
 //|                     AAI_EA_TradeManager.mq5                      |
-//|           v3.13 - SafeTest Override & Closed-Bar Read            |
+//|                    v3.15 - Corrected iATR Call                   |
 //|         (Takes trade signals from AAI_Indicator_SignalBrain)     |
 //|                                                                  |
 //| Copyright 2025, AlfredAI Project                    |
 //+------------------------------------------------------------------+
 #property strict
-#property version   "3.13"
+#property version   "3.15"
 #property description "Manages trades and logs closed positions to a CSV journal."
 #include <Trade\Trade.mqh>
 
@@ -49,6 +49,7 @@ enum ENUM_REASON_CODE
     REASON_BIAS_CONFLICT,
     REASON_TEST_SCENARIO // Added for SafeTest override
 };
+
 //--- EA Inputs
 enum ENUM_EXECUTION_MODE { SignalsOnly, AutoExecute };
 input ENUM_EXECUTION_MODE ExecutionMode = SignalsOnly;
@@ -57,26 +58,36 @@ input int  IndicatorInitRetries = 50;
 input int      MinConfidenceToTrade = 13;
 input ulong    MagicNumber          = 1337;
 input ENUM_TIMEFRAMES SignalTimeframe = PERIOD_CURRENT;
-input int SB_ReadShift = 1; // 0=current, 1=closed bar (default)
+input int SB_ReadShift = 1;
+// 0=current, 1=closed bar (default)
 
 // === BEGIN Spec 2: Add EA inputs to forward into SignalBrain ===
 input group "SignalBrain Pass-Through Inputs"
 // ==== SignalBrain pass-through (so iCustom gets the right inputs) ====
-input bool SB_PassThrough_SafeTest   = true;   // set TRUE for smoke runs
-input bool SB_PassThrough_UseZE      = false;  // decouple ZE during smoke
-input bool SB_PassThrough_UseBC      = false;  // decouple BC during smoke
-input int  SB_PassThrough_WarmupBars = 150;    // match SB default
-input int  SB_PassThrough_FastMA     = 10;     // match SB default (if present)
-input int  SB_PassThrough_SlowMA     = 30;     // match SB default (if present)
+input bool SB_PassThrough_SafeTest   = true;
+// set TRUE for smoke runs
+input bool SB_PassThrough_UseZE      = false;
+// decouple ZE during smoke
+input bool SB_PassThrough_UseBC      = false;
+// decouple BC during smoke
+input int  SB_PassThrough_WarmupBars = 150;
+// match SB default
+input int  SB_PassThrough_FastMA     = 10;
+// match SB default (if present)
+input int  SB_PassThrough_SlowMA     = 30;
+// match SB default (if present)
 // If your SignalBrain declares MinZoneStrength as an input, mirror it too:
-input int  SB_PassThrough_MinZoneStrength = 4; // ONLY if SB has this input
-
+input int  SB_PassThrough_MinZoneStrength = 4;
+// ONLY if SB has this input
+input bool SB_PassThrough_EnableDebug = true; 
 // === END Spec 2 ===
 
 //--- Debug Inputs ---
 input group "Debugging"
-input bool Debug_LogSBZE     = true;   // per-bar SB/ZE reads
-input int  Debug_LogEveryN   = 1;      // log cadence in bars (1 = every processed bar)
+input bool Debug_LogSBZE     = true;
+// per-bar SB/ZE reads
+input int  Debug_LogEveryN   = 1;
+// log cadence in bars (1 = every processed bar)
 
 
 //--- Dynamic Risk & Position Sizing Inputs ---
@@ -119,6 +130,7 @@ int       g_logged_positions_total = 0;
 int sb_handle = INVALID_HANDLE;
 int ze_handle = INVALID_HANDLE;
 int g_hBiasCompass = INVALID_HANDLE; // Kept for future compatibility
+int g_hATR = INVALID_HANDLE;          // FIX: Added handle for ATR indicator
 ENUM_TIMEFRAMES g_sbTF = PERIOD_CURRENT;
 
 // --- State Management Globals ---
@@ -219,16 +231,17 @@ int OnInit()
 
    if(EnableJournaling) WriteJournalHeader();
 
-   // --- Create and store indicator handles with positional inputs ---
    // The order of parameters MUST match the 'input' order in AAI_Indicator_SignalBrain.mq5
    sb_handle = iCustom(_Symbol, SignalTimeframe, "AAI_Indicator_SignalBrain",
-                       SB_PassThrough_MinZoneStrength,
-                       SB_PassThrough_SafeTest,
-                       SB_PassThrough_UseZE,
-                       SB_PassThrough_UseBC,
-                       SB_PassThrough_WarmupBars,
-                       SB_PassThrough_FastMA,
-                       SB_PassThrough_SlowMA);
+                       SB_PassThrough_SafeTest,        // 1. SB_SafeTest
+                       SB_PassThrough_UseZE,           // 2. UseZoneEngine
+                       SB_PassThrough_UseBC,           // 3. UseBiasCompass
+                       SB_PassThrough_WarmupBars,      // 4. WarmupBars
+                       SB_PassThrough_FastMA,          // 5. FastMA
+                       SB_PassThrough_SlowMA,          // 6. SlowMA
+                       SB_PassThrough_MinZoneStrength, // 7. MinZoneStrength
+                       SB_PassThrough_EnableDebug      // 8. EnableDebugLogging
+                       );
    
    ze_handle = iCustom(_Symbol, SignalTimeframe, "AAI_Indicator_ZoneEngine");
    
@@ -238,7 +251,7 @@ int OnInit()
       return(INIT_FAILED);
    }
 
-   PrintFormat("[INIT] EA→SB args: SafeTest=%c UseZE=%c UseBC=%c Warmup=%d Fast=%d Slow=%d MinZoneStr=%d | sb_handle=%d",
+   PrintFormat("[INIT] EA→SB args: SafeTest=%c UseZE=%c UseBC=%c Warmup=%d Fast=%d Slow=%d MinZoneStr=%d Debug=%c | sb_handle=%d",
                SB_PassThrough_SafeTest ? 'T' : 'F', 
                SB_PassThrough_UseZE ? 'T' : 'F', 
                SB_PassThrough_UseBC ? 'T' : 'F',
@@ -246,9 +259,18 @@ int OnInit()
                SB_PassThrough_FastMA, 
                SB_PassThrough_SlowMA, 
                SB_PassThrough_MinZoneStrength,
+               SB_PassThrough_EnableDebug ? 'T' : 'F',
                sb_handle);
                
-   PrintFormat("[INIT] EA reading SB at shift=%d (closed bar if 1)", SB_ReadShift);
+   PrintFormat("[DBG_SHIFT] EA reading SB at shift=%d (closed bar if 1)", SB_ReadShift);
+
+   // FIX: Create handle for ATR
+   g_hATR = iATR(_Symbol, _Period, 14);
+   if(g_hATR == INVALID_HANDLE)
+   {
+       Print("[ERR] Failed to create ATR indicator handle");
+       return(INIT_FAILED);
+   }
 
    EventSetTimer(1);
    return(INIT_SUCCEEDED);
@@ -264,6 +286,7 @@ void OnDeinit(const int reason)
    if(sb_handle != INVALID_HANDLE) IndicatorRelease(sb_handle);
    if(ze_handle != INVALID_HANDLE) IndicatorRelease(ze_handle);
    if(g_hBiasCompass != INVALID_HANDLE) IndicatorRelease(g_hBiasCompass);
+   if(g_hATR != INVALID_HANDLE) IndicatorRelease(g_hATR); // FIX: Release ATR handle
 }
 
 //+------------------------------------------------------------------+
@@ -326,11 +349,10 @@ void OnTick()
    
    if(g_lastBarTime == 0) PrintFormat("%s %s", EVT_FIRST_BAR_OR_NEW, TimeToString(t, TIME_DATE|TIME_MINUTES));
    g_lastBarTime = t;
-
    bool inSession = IsTradingSession();
    if(EnableLogging)
       PrintFormat("[BAR] srv=%s — InSession=%s", TimeToString(TimeCurrent()), inSession  ? "YES" : "NO");
-   
+
    if(!PositionSelect(_Symbol))
    {
       CheckForNewTrades(inSession);
@@ -363,21 +385,17 @@ void CheckForNewTrades(bool inSession)
       return;
    }
    
-   // --- SafeTest Override ---
-   if(SB_PassThrough_SafeTest)
+   // --- Debug Logging ---
+   if(Debug_LogSBZE)
    {
-      sbConf = 10.0;
-      sbReason = (double)REASON_TEST_SCENARIO;
+        PrintFormat("[DBG_SB] shift=%d sig=%.1f conf=%.1f reason=%g ztf=%g", 
+                   readShift, sbSig, sbConf, sbReason, sbZoneTF);
    }
 
-   // --- Debug Logging ---
-   PrintFormat("[DBG_SB] shift=%d sig=%.1f conf=%.1f reason=%g ztf=%g", 
-               readShift, sbSig, sbConf, sbReason, sbZoneTF);
-   
    double zeProx=0, zeDist=0;
    ReadOne(ze_handle, ZE_BUF_PROXIMAL, 1, zeProx);
    ReadOne(ze_handle, ZE_BUF_DISTAL,   1, zeDist);
-   
+
    // --- Entry Conditions ---
    int signal = (int)sbSig;
    if(signal == 0) return;
@@ -386,12 +404,13 @@ void CheckForNewTrades(bool inSession)
    if(MinConfidenceToTrade > 0 && confidence < MinConfidenceToTrade) return;
 
    ENUM_REASON_CODE reasonCode = (ENUM_REASON_CODE)sbReason;
-      
-   if(zeDist == 0.0)
+
+   // For SafeTest, we don't need a real zone, so bypass this check
+   if(!SB_PassThrough_SafeTest && zeDist == 0.0)
    {
       if(!g_warn_log_flags[ZE_BUF_DISTAL]) 
       {
-         PrintFormat("%s Read failed or invalid: ZE buf %d", EVT_WARN, ZE_BUF_DISTAL); 
+         PrintFormat("%s Read failed or invalid: ZE buf %d", EVT_WARN, ZE_BUF_DISTAL);
          g_warn_log_flags[ZE_BUF_DISTAL] = true; 
       }
       return;
@@ -404,9 +423,38 @@ void CheckForNewTrades(bool inSession)
    double risk_points = 0;
    double lots_to_trade = 0;
 
-   if(signal == 1) { sl = zeDist - sl_buffer_points; risk_points = ask - sl; if(risk_points <= 0) return; tp = ask + risk_points * RiskRewardRatio; }
-   else { sl = zeDist + sl_buffer_points; risk_points = sl - bid; if(risk_points <= 0) return; tp = bid - risk_points * RiskRewardRatio; }
+    // --- SL/TP logic ---
+   if(SB_PassThrough_SafeTest) // Simplified SL/TP for SafeTest
+   {
+       // FIX: Correctly read ATR value from handle using CopyBuffer
+       double atr_buffer[1];
+       double atr = 0.0;
+       if(CopyBuffer(g_hATR, 0, 1, 1, atr_buffer) > 0)
+       {
+           atr = atr_buffer[0];
+       }
+       else
+       {
+           Print("%s Failed to copy ATR buffer, cannot place SafeTest trade.", EVT_WARN);
+           return; // Can't proceed without valid ATR
+       }
+       
+       if(atr <= 0) return; // Don't trade if ATR is invalid
 
+       if(signal == 1) { sl = bid - atr; tp = bid + atr * RiskRewardRatio; risk_points = atr; }
+       else { sl = ask + atr; tp = ask - atr * RiskRewardRatio; risk_points = atr; }
+   }
+   else // Original Zone-based SL/TP
+   {
+       if(signal == 1) { sl = zeDist - sl_buffer_points; risk_points = ask - sl; }
+       else { sl = zeDist + sl_buffer_points; risk_points = sl - bid; }
+       if(risk_points <= 0) return;
+       if(signal == 1) { tp = ask + risk_points * RiskRewardRatio; }
+       else { tp = bid - risk_points * RiskRewardRatio; }
+   }
+   
+   if(risk_points <= 0) return;
+   
    lots_to_trade = CalculateLotSize(confidence, risk_points);
    if(lots_to_trade < MinLotSize) return;
 
@@ -473,7 +521,8 @@ void HandlePartialProfits()
    if(initial_risk_pips <= 0) return;
    long type = PositionGetInteger(POSITION_TYPE);
    double open_price = PositionGetDouble(POSITION_PRICE_OPEN);
-   double current_profit_pips = (type == POSITION_TYPE_BUY) ? PipsFromPrice(SymbolInfoDouble(symbolName, SYMBOL_BID) - open_price) : PipsFromPrice(open_price - SymbolInfoDouble(symbolName, SYMBOL_ASK));
+   double current_profit_pips = (type == POSITION_TYPE_BUY) ?
+      PipsFromPrice(SymbolInfoDouble(symbolName, SYMBOL_BID) - open_price) : PipsFromPrice(open_price - SymbolInfoDouble(symbolName, SYMBOL_ASK));
    if(current_profit_pips >= initial_risk_pips * PartialProfitRR)
    {
       ulong ticket = PositionGetInteger(POSITION_TICKET);
@@ -486,7 +535,8 @@ void HandlePartialProfits()
       {
          if(trade.PositionModify(ticket, open_price, PositionGetDouble(POSITION_TP)))
          {
-            MqlTradeRequest req; MqlTradeResult res; ZeroMemory(req);
+            MqlTradeRequest req;
+            MqlTradeResult res; ZeroMemory(req);
             req.action = TRADE_ACTION_MODIFY; req.position = ticket;
             req.sl = open_price; req.tp = PositionGetDouble(POSITION_TP);
             req.comment = comment + "|P1";
@@ -549,7 +599,8 @@ void LogClosedPosition(ulong position_id)
       {
          if(entry_t==0)
          {
-            entry_t = (datetime)HistoryDealGetInteger(deal, DEAL_TIME); entry_p = HistoryDealGetDouble(deal, DEAL_PRICE);
+            entry_t = (datetime)HistoryDealGetInteger(deal, DEAL_TIME);
+            entry_p = HistoryDealGetDouble(deal, DEAL_PRICE);
             pos_sym = HistoryDealGetString(deal, DEAL_SYMBOL); pos_comm = HistoryDealGetString(deal, DEAL_COMMENT);
             pos_type = (int)HistoryDealGetInteger(deal, DEAL_TYPE); total_vol += HistoryDealGetDouble(deal, DEAL_VOLUME);
          }
