@@ -1,24 +1,35 @@
 //+------------------------------------------------------------------+
 //|                  AAI_Indicator_SignalBrain.mq5                   |
-//|                 v3.3 - Corrected SafeTest Handles                |
+//|               v3.4 - Corrected Headless Buffer Publishing        |
 //|          Acts as the confluence and trade signal engine.         |
 //|                                                                  |
 //| Copyright 2025, AlfredAI Project                    |
 //+------------------------------------------------------------------+
 #property strict
 #property indicator_chart_window
-#property version "3.3"
+#property version "3.4"
 
 // --- Indicator Buffers ---
 #property indicator_buffers 4
-#property indicator_plots   0
+#property indicator_plots   4 // FIX: Must match buffer count for EA/iCustom access.
 
+// --- Buffer 0: Signal ---
+#property indicator_type1   DRAW_NONE
 #property indicator_label1  "Signal"
 double SignalBuffer[];
+
+// --- Buffer 1: Confidence ---
+#property indicator_type2   DRAW_NONE
 #property indicator_label2  "Confidence"
 double ConfidenceBuffer[];
+
+// --- Buffer 2: ReasonCode ---
+#property indicator_type3   DRAW_NONE
 #property indicator_label3  "ReasonCode"
 double ReasonCodeBuffer[];
+
+// --- Buffer 3: ZoneTimeframe ---
+#property indicator_type4   DRAW_NONE
 #property indicator_label4  "ZoneTimeframe"
 double ZoneTFBuffer[];
 
@@ -180,7 +191,8 @@ int OnCalculate(const int rates_total,
             double zeStatus_arr[1], zeStrength_arr[1], zeLiquidity_arr[1];
             
             htfBias_arr[0] = 0; htfConf_arr[0] = 0;
-            zeStatus_arr[0] = 0; zeStrength_arr[0] = 0; zeLiquidity_arr[0] = 0;
+            zeStatus_arr[0] = 0;
+            zeStrength_arr[0] = 0; zeLiquidity_arr[0] = 0;
 
             if(BC_handle != INVALID_HANDLE)
             {
@@ -242,7 +254,7 @@ int OnCalculate(const int rates_total,
     ConfidenceBuffer[0] = ConfidenceBuffer[1];
     ReasonCodeBuffer[0] = ReasonCodeBuffer[1];
     ZoneTFBuffer[0]     = ZoneTFBuffer[1];
-    
+
     // --- Optional Debug Logging ---
     if(EnableDebugLogging && time[rates_total-1] != g_last_log_time)
     {
