@@ -1,12 +1,12 @@
 //+------------------------------------------------------------------+
 //|                     AAI_EA_TradeManager.mq5                      |
-//|                    v3.15 - Corrected iATR Call                   |
+//|         v3.20 - Unified Price Helpers & Compile Fixes            |
 //|         (Takes trade signals from AAI_Indicator_SignalBrain)     |
 //|                                                                  |
 //| Copyright 2025, AlfredAI Project                    |
 //+------------------------------------------------------------------+
 #property strict
-#property version   "3.15"
+#property version   "3.20"
 #property description "Manages trades and logs closed positions to a CSV journal."
 #include <Trade\Trade.mqh>
 
@@ -24,12 +24,17 @@
 #define EVT_TICK "[EVT_TICK]"
 #define EVT_FIRST_BAR_OR_NEW "[EVT_FIRST_BAR_OR_NEW]"
 #define EVT_WARN "[EVT_WARN]"
+#define DBG_GATES "[DBG_GATES]"
+#define DBG_STOPS "[DBG_STOPS]"
+#define EVT_SUPPRESS "[EVT_SUPPRESS]"
 
 // === BEGIN Spec: Constants for buffer indexes ===
 #define SB_BUF_SIGNAL   0
 #define SB_BUF_CONF     1
 #define SB_BUF_REASON   2
 #define SB_BUF_ZONETF   3
+#define BC_BUF_HTF_BIAS 0 // BiasCompass HTF Bias buffer
+#define ZE_BUF_STATUS   0 // ZoneEngine ZoneStatus buffer
 
 #define ZE_BUF_PROXIMAL 6
 #define ZE_BUF_DISTAL   7
@@ -52,43 +57,26 @@ enum ENUM_REASON_CODE
 
 //--- EA Inputs
 enum ENUM_EXECUTION_MODE { SignalsOnly, AutoExecute };
-input ENUM_EXECUTION_MODE ExecutionMode = SignalsOnly;
-input bool UseBiasCompass = true;
+enum ENUM_ENTRY_MODE { FirstBarOrEdge, EdgeOnly };
+input ENUM_EXECUTION_MODE ExecutionMode = AutoExecute;
+input ENUM_ENTRY_MODE     EntryMode     = FirstBarOrEdge;
 input int  IndicatorInitRetries = 50;
-input int      MinConfidenceToTrade = 13;
+input int      MinConfidenceToTrade = 1;
 input ulong    MagicNumber          = 1337;
 input ENUM_TIMEFRAMES SignalTimeframe = PERIOD_CURRENT;
 input int SB_ReadShift = 1;
-// 0=current, 1=closed bar (default)
 
 // === BEGIN Spec 2: Add EA inputs to forward into SignalBrain ===
 input group "SignalBrain Pass-Through Inputs"
-// ==== SignalBrain pass-through (so iCustom gets the right inputs) ====
-input bool SB_PassThrough_SafeTest   = true;
-// set TRUE for smoke runs
+input bool SB_PassThrough_SafeTest   = false;
 input bool SB_PassThrough_UseZE      = false;
-// decouple ZE during smoke
 input bool SB_PassThrough_UseBC      = false;
-// decouple BC during smoke
 input int  SB_PassThrough_WarmupBars = 150;
-// match SB default
 input int  SB_PassThrough_FastMA     = 10;
-// match SB default (if present)
 input int  SB_PassThrough_SlowMA     = 30;
-// match SB default (if present)
-// If your SignalBrain declares MinZoneStrength as an input, mirror it too:
 input int  SB_PassThrough_MinZoneStrength = 4;
-// ONLY if SB has this input
 input bool SB_PassThrough_EnableDebug = true; 
 // === END Spec 2 ===
-
-//--- Debug Inputs ---
-input group "Debugging"
-input bool Debug_LogSBZE     = true;
-// per-bar SB/ZE reads
-input int  Debug_LogEveryN   = 1;
-// log cadence in bars (1 = every processed bar)
-
 
 //--- Dynamic Risk & Position Sizing Inputs ---
 input group "Risk Management"
@@ -100,6 +88,8 @@ input double   RiskRewardRatio      = 1.5;
 
 //--- Trade Management Inputs ---
 input group "Trade Management"
+input int      MaxSpreadPoints      = 20;
+input int      MaxSlippagePoints    = 10;
 input bool     EnablePartialProfits = true;
 input double   PartialProfitRR      = 1.0;
 input double   PartialClosePercent  = 50.0;
@@ -129,40 +119,32 @@ int       g_logged_positions_total = 0;
 // --- Persistent Indicator Handles ---
 int sb_handle = INVALID_HANDLE;
 int ze_handle = INVALID_HANDLE;
-int g_hBiasCompass = INVALID_HANDLE; // Kept for future compatibility
-int g_hATR = INVALID_HANDLE;          // FIX: Added handle for ATR indicator
+int bc_handle = INVALID_HANDLE;
+int g_hATR = INVALID_HANDLE;
 ENUM_TIMEFRAMES g_sbTF = PERIOD_CURRENT;
 
 // --- State Management Globals ---
 static datetime g_lastBarTime = 0;
+static datetime g_last_suppress_log_time = 0;
 static ulong    g_tickCount   = 0;
 static int      g_init_ticks  = 0;
 static datetime g_last_wait_log_time = 0;
 bool g_warmup_complete = false;
-bool g_warn_log_flags[10]; // For one-time warnings per buffer index
-
-
-// --- DEBUG FLAG ---
-const bool EnableEADebugLogging = true;
-const ENUM_TIMEFRAMES HTF_DEBUG = PERIOD_H4;
-const ENUM_TIMEFRAMES LTF_DEBUG = PERIOD_M15;
+bool g_bootstrap_done = false;
+bool g_warn_log_flags[10];
 
 //+------------------------------------------------------------------+
-//| Pip Math Helpers                                                 |
+//| Pip Math Helpers (FIXED)                                         |
 //+------------------------------------------------------------------+
-double PipPoint()
+inline double PipSize()
 {
-    double point_local = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
-    int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
-    double pip = (digits % 2 != 0) ? (10 * point_local) : point_local;
-    return pip;
+   const int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+   return (digits == 3 || digits == 5) ? 10 * _Point : _Point;
 }
-double PriceFromPips(double pips) { return pips * PipPoint(); }
-double PipsFromPrice(double price_diff)
+
+inline double PriceFromPips(double pips)
 {
-   double pip_point = PipPoint();
-   if(pip_point <= 0.0) return 0.0;
-   return price_diff / pip_point;
+   return pips * PipSize();
 }
 
 //+------------------------------------------------------------------+
@@ -176,7 +158,6 @@ inline bool ReadOne(const int handle, const int buf, const int shift, double &ou
         return false;
     }
     double tmp[1];
-    // No need for ArraySetAsSeries on a locally scoped array
     int n = CopyBuffer(handle, buf, shift, 1, tmp);
     if(n == 1)
     {
@@ -231,27 +212,29 @@ int OnInit()
 
    if(EnableJournaling) WriteJournalHeader();
 
-   // The order of parameters MUST match the 'input' order in AAI_Indicator_SignalBrain.mq5
    sb_handle = iCustom(_Symbol, SignalTimeframe, "AAI_Indicator_SignalBrain",
-                       SB_PassThrough_SafeTest,        // 1. SB_SafeTest
-                       SB_PassThrough_UseZE,           // 2. UseZoneEngine
-                       SB_PassThrough_UseBC,           // 3. UseBiasCompass
-                       SB_PassThrough_WarmupBars,      // 4. WarmupBars
-                       SB_PassThrough_FastMA,          // 5. FastMA
-                       SB_PassThrough_SlowMA,          // 6. SlowMA
-                       SB_PassThrough_MinZoneStrength, // 7. MinZoneStrength
-                       SB_PassThrough_EnableDebug      // 8. EnableDebugLogging
+                       SB_PassThrough_SafeTest,
+                       SB_PassThrough_UseZE,
+                       SB_PassThrough_UseBC,
+                       SB_PassThrough_WarmupBars,
+                       SB_PassThrough_FastMA,
+                       SB_PassThrough_SlowMA,
+                       SB_PassThrough_MinZoneStrength,
+                       SB_PassThrough_EnableDebug
                        );
    
-   ze_handle = iCustom(_Symbol, SignalTimeframe, "AAI_Indicator_ZoneEngine");
+   if(SB_PassThrough_UseZE) ze_handle = iCustom(_Symbol, SignalTimeframe, "AAI_Indicator_ZoneEngine");
+   if(SB_PassThrough_UseBC) bc_handle = iCustom(_Symbol, SignalTimeframe, "AAI_Indicator_BiasCompass");
    
    if(sb_handle == INVALID_HANDLE)
    {
       Print("[ERR] SB iCustom handle invalid");
       return(INIT_FAILED);
    }
-
-   PrintFormat("[INIT] EA→SB args: SafeTest=%c UseZE=%c UseBC=%c Warmup=%d Fast=%d Slow=%d MinZoneStr=%d Debug=%c | sb_handle=%d",
+   
+   PrintFormat("%s EntryMode=%s", EVT_INIT, EnumToString(EntryMode));
+   PrintFormat("%s EA→SB args: SafeTest=%c UseZE=%c UseBC=%c Warmup=%d Fast=%d Slow=%d MinZoneStr=%d Debug=%c | sb_handle=%d",
+               EVT_INIT,
                SB_PassThrough_SafeTest ? 'T' : 'F', 
                SB_PassThrough_UseZE ? 'T' : 'F', 
                SB_PassThrough_UseBC ? 'T' : 'F',
@@ -264,7 +247,6 @@ int OnInit()
                
    PrintFormat("[DBG_SHIFT] EA reading SB at shift=%d (closed bar if 1)", SB_ReadShift);
 
-   // FIX: Create handle for ATR
    g_hATR = iATR(_Symbol, _Period, 14);
    if(g_hATR == INVALID_HANDLE)
    {
@@ -285,8 +267,8 @@ void OnDeinit(const int reason)
    PrintFormat("%s Deinitialized. Reason=%d", EVT_INIT, reason);
    if(sb_handle != INVALID_HANDLE) IndicatorRelease(sb_handle);
    if(ze_handle != INVALID_HANDLE) IndicatorRelease(ze_handle);
-   if(g_hBiasCompass != INVALID_HANDLE) IndicatorRelease(g_hBiasCompass);
-   if(g_hATR != INVALID_HANDLE) IndicatorRelease(g_hATR); // FIX: Release ATR handle
+   if(bc_handle != INVALID_HANDLE) IndicatorRelease(bc_handle);
+   if(g_hATR != INVALID_HANDLE) IndicatorRelease(g_hATR);
 }
 
 //+------------------------------------------------------------------+
@@ -333,160 +315,192 @@ void OnTick()
       ManageOpenPositions(dt, !IsTradingSession());
    }
    
-   int sb_bars = BarsCalculated(sb_handle);
-   if(sb_bars < 2)
+   if(!g_warmup_complete)
    {
-      if(TimeCurrent() - g_last_wait_log_time > 60)
-      {
-         PrintFormat("%s BarsCalculated SB=%d — deferring", EVT_WAIT, sb_bars);
-         g_last_wait_log_time = TimeCurrent();
-      }
-      return;
+       if(Bars(_Symbol, SignalTimeframe) > SB_PassThrough_WarmupBars)
+       {
+           g_warmup_complete = true;
+           PrintFormat("[INIT] Warmup complete (%d bars). Live trading enabled.", SB_PassThrough_WarmupBars);
+       }
+       else
+       {
+           return;
+       }
    }
-
-   datetime t = iTime(_Symbol, SignalTimeframe, 0);
-   if(t == 0 || t == g_lastBarTime) return;
    
-   if(g_lastBarTime == 0) PrintFormat("%s %s", EVT_FIRST_BAR_OR_NEW, TimeToString(t, TIME_DATE|TIME_MINUTES));
-   g_lastBarTime = t;
-   bool inSession = IsTradingSession();
-   if(EnableLogging)
-      PrintFormat("[BAR] srv=%s — InSession=%s", TimeToString(TimeCurrent()), inSession  ? "YES" : "NO");
-
-   if(!PositionSelect(_Symbol))
-   {
-      CheckForNewTrades(inSession);
-   }
+   datetime bar_time = iTime(_Symbol, _Period, SB_ReadShift);
+   if(bar_time == 0 || bar_time == g_lastBarTime) return;
+   
+   g_lastBarTime = bar_time;
+   
+   CheckForNewTrades();
 }
 
 
 //+------------------------------------------------------------------+
 //| Check & execute new entries                                      |
 //+------------------------------------------------------------------+
-void CheckForNewTrades(bool inSession)
+void CheckForNewTrades()
 {
-   if(!inSession) return;
-
-   // --- Read SignalBrain and ZoneEngine buffers safely ---
-   const int readShift = MathMax(0, SB_ReadShift);
-   double sbSig=0, sbConf=0, sbReason=0, sbZoneTF=0;
+   const int readShift = MathMax(1, SB_ReadShift);
+   double sbSig_curr=0, sbConf=0, sbReason=0, sbZoneTF=0;
+   double sbSig_prev=0;
    
-   bool okSig = ReadOne(sb_handle, SB_BUF_SIGNAL, readShift, sbSig);
-   bool okConf = ReadOne(sb_handle, SB_BUF_CONF, readShift, sbConf);
-   bool okReason = ReadOne(sb_handle, SB_BUF_REASON, readShift, sbReason);
-   bool okZoneTF = ReadOne(sb_handle, SB_BUF_ZONETF, readShift, sbZoneTF);
+   ReadOne(sb_handle, SB_BUF_SIGNAL, readShift, sbSig_curr);
+   if(!ReadOne(sb_handle, SB_BUF_SIGNAL, readShift + 1, sbSig_prev)) sbSig_prev = sbSig_curr;
+   ReadOne(sb_handle, SB_BUF_CONF,   readShift, sbConf);
+   ReadOne(sb_handle, SB_BUF_REASON, readShift, sbReason);
+   ReadOne(sb_handle, SB_BUF_ZONETF, readShift, sbZoneTF);
 
-   if(!okSig || !okConf || !okReason || !okZoneTF)
+   bool flat = !PositionSelect(_Symbol);
+   bool in_sess = IsTradingSession();
+   bool conf_ok = ((int)sbConf >= MinConfidenceToTrade);
+   long current_spread = SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
+   bool spread_ok = (MaxSpreadPoints == 0 || current_spread <= MaxSpreadPoints);
+   bool is_edge = ((int)sbSig_curr != (int)sbSig_prev);
+
+   bool bc_ok = !SB_PassThrough_UseBC;
+   if(SB_PassThrough_UseBC)
    {
-      if(!okSig) PrintFormat("%s Read failed: SB buf %d", EVT_WARN, SB_BUF_SIGNAL);
-      if(!okConf) PrintFormat("%s Read failed: SB buf %d", EVT_WARN, SB_BUF_CONF);
-      if(!okReason) PrintFormat("%s Read failed: SB buf %d", EVT_WARN, SB_BUF_REASON);
-      if(!okZoneTF) PrintFormat("%s Read failed: SB buf %d", EVT_WARN, SB_BUF_ZONETF);
-      return;
-   }
-   
-   // --- Debug Logging ---
-   if(Debug_LogSBZE)
-   {
-        PrintFormat("[DBG_SB] shift=%d sig=%.1f conf=%.1f reason=%g ztf=%g", 
-                   readShift, sbSig, sbConf, sbReason, sbZoneTF);
-   }
-
-   double zeProx=0, zeDist=0;
-   ReadOne(ze_handle, ZE_BUF_PROXIMAL, 1, zeProx);
-   ReadOne(ze_handle, ZE_BUF_DISTAL,   1, zeDist);
-
-   // --- Entry Conditions ---
-   int signal = (int)sbSig;
-   if(signal == 0) return;
-
-   int confidence = (int)sbConf;
-   if(MinConfidenceToTrade > 0 && confidence < MinConfidenceToTrade) return;
-
-   ENUM_REASON_CODE reasonCode = (ENUM_REASON_CODE)sbReason;
-
-   // For SafeTest, we don't need a real zone, so bypass this check
-   if(!SB_PassThrough_SafeTest && zeDist == 0.0)
-   {
-      if(!g_warn_log_flags[ZE_BUF_DISTAL]) 
-      {
-         PrintFormat("%s Read failed or invalid: ZE buf %d", EVT_WARN, ZE_BUF_DISTAL);
-         g_warn_log_flags[ZE_BUF_DISTAL] = true; 
-      }
-      return;
+      double htf_bias = 0;
+      if(ReadOne(bc_handle, BC_BUF_HTF_BIAS, readShift, htf_bias))
+         bc_ok = ((sbSig_curr > 0 && htf_bias > 0) || (sbSig_curr < 0 && htf_bias < 0));
    }
 
-   double ask = SymbolInfoDouble(symbolName, SYMBOL_ASK);
-   double bid = SymbolInfoDouble(symbolName, SYMBOL_BID);
-   double sl = 0, tp = 0;
-   double sl_buffer_points = PriceFromPips(StopLossBufferPips);
-   double risk_points = 0;
-   double lots_to_trade = 0;
-
-    // --- SL/TP logic ---
-   if(SB_PassThrough_SafeTest) // Simplified SL/TP for SafeTest
+   bool ze_ok = !SB_PassThrough_UseZE;
+   if(SB_PassThrough_UseZE)
    {
-       // FIX: Correctly read ATR value from handle using CopyBuffer
-       double atr_buffer[1];
-       double atr = 0.0;
-       if(CopyBuffer(g_hATR, 0, 1, 1, atr_buffer) > 0)
+      double zone_status = 0;
+      if(ReadOne(ze_handle, ZE_BUF_STATUS, readShift, zone_status))
+         ze_ok = ((sbSig_curr > 0 && zone_status > 0) || (sbSig_curr < 0 && zone_status < 0));
+   }
+
+   PrintFormat("%s t=%s sig_prev=%d sig_curr=%d conf=%d min=%d flat=%s in_sess=%s spread_ok=%s bc_ok=%s ze_ok=%s bootstrap_done=%s entry_mode=%s",
+               DBG_GATES, TimeToString(g_lastBarTime), (int)sbSig_prev, (int)sbSig_curr, (int)sbConf, MinConfidenceToTrade,
+               flat ? "T" : "F", in_sess ? "T" : "F", spread_ok ? "T" : "F", bc_ok ? "T" : "F", ze_ok ? "T" : "F",
+               g_bootstrap_done ? "T" : "F", EnumToString(EntryMode));
+
+   bool attempt_trade = false;
+   bool is_bootstrap_attempt = false;
+
+   if(EntryMode == FirstBarOrEdge && !g_bootstrap_done)
+   {
+       if(flat && in_sess && conf_ok && spread_ok && bc_ok && ze_ok && (int)sbSig_curr != 0)
        {
-           atr = atr_buffer[0];
+           attempt_trade = true;
+           is_bootstrap_attempt = true;
        }
-       else
-       {
-           Print("%s Failed to copy ATR buffer, cannot place SafeTest trade.", EVT_WARN);
-           return; // Can't proceed without valid ATR
-       }
-       
-       if(atr <= 0) return; // Don't trade if ATR is invalid
-
-       if(signal == 1) { sl = bid - atr; tp = bid + atr * RiskRewardRatio; risk_points = atr; }
-       else { sl = ask + atr; tp = ask - atr * RiskRewardRatio; risk_points = atr; }
    }
-   else // Original Zone-based SL/TP
+   else if (is_edge && flat && in_sess && conf_ok && spread_ok && bc_ok && ze_ok && (int)sbSig_curr != 0)
    {
-       if(signal == 1) { sl = zeDist - sl_buffer_points; risk_points = ask - sl; }
-       else { sl = zeDist + sl_buffer_points; risk_points = sl - bid; }
-       if(risk_points <= 0) return;
-       if(signal == 1) { tp = ask + risk_points * RiskRewardRatio; }
-       else { tp = bid - risk_points * RiskRewardRatio; }
+       attempt_trade = true;
    }
    
-   if(risk_points <= 0) return;
-   
-   lots_to_trade = CalculateLotSize(confidence, risk_points);
-   if(lots_to_trade < MinLotSize) return;
-
-   double risk_pips = PipsFromPrice(risk_points);
-   string comment = StringFormat("AAI|C%d|R%d|Risk%.1f", confidence, (int)reasonCode, risk_pips);
-   
-   string signal_str = (signal == 1) ? "BUY" : "SELL";
-   bool is_allowed = (ExecutionMode == AutoExecute);
-   PrintFormat("%s mode=%s signal=%s conf=%d/20 reason=%s allowed=%s",
-               EVT_ENTRY_CHECK, EnumToString(ExecutionMode), signal_str, confidence, ReasonCodeToShortString(reasonCode), is_allowed ? "YES" : "NO");
-
-   if(is_allowed)
+   if(attempt_trade)
    {
-      if(signal == 1)
+      bool success = TryOpenPosition((int)sbSig_curr, (int)sbConf, is_bootstrap_attempt);
+      if(is_bootstrap_attempt && success)
       {
-         if(!trade.Buy(lots_to_trade, symbolName, ask, sl, tp, comment)) PrintFormat("%s BUY failed (Err:%d %s)", EVT_ENTRY, trade.ResultRetcode(), trade.ResultComment());
-         else PrintFormat("%s Signal:BUY → Executed %.2f lots @%.5f | SL:%.5f TP:%.5f", EVT_ENTRY, lots_to_trade, trade.ResultPrice(), sl, tp);
+         g_bootstrap_done = true;
       }
-      else if(signal == -1)
-      {
-         if(!trade.Sell(lots_to_trade, symbolName, bid, sl, tp, comment)) PrintFormat("%s SELL failed (Err:%d %s)", EVT_ENTRY, trade.ResultRetcode(), trade.ResultComment());
-         else PrintFormat("%s Signal:SELL → Executed %.2f lots @%.5f | SL:%.5f TP:%.5f", EVT_ENTRY, lots_to_trade, trade.ResultPrice(), sl, tp);
-      }
-   }
-   else
-   {
-      Print("%s mode=SignalsOnly", EVT_ORDER_BLOCKED);
    }
 }
 
 //+------------------------------------------------------------------+
-//| Manage open positions (logic unchanged)                          |
+//| Attempts to open a trade and returns true on success             |
+//+------------------------------------------------------------------+
+bool TryOpenPosition(int signal, int confidence, bool is_bootstrap)
+{
+   MqlTick t;
+   if(!SymbolInfoTick(_Symbol, t) || t.time_msc == 0)
+   {
+      if(g_lastBarTime != g_last_suppress_log_time)
+      {
+         PrintFormat("%s bootstrap=%s reason=no_tick", EVT_SUPPRESS, is_bootstrap ? "YES" : "NO");
+         g_last_suppress_log_time = g_lastBarTime;
+      }
+      return false;
+   }
+
+   const int    digs = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+   const double pip_size = PipSize();
+   const double step = MathMax(SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE), point);
+   const double min_stop_dist = (double)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * point;
+   const double buf_price = PriceFromPips(StopLossBufferPips);
+   const double sl_dist = MathMax(min_stop_dist + step, buf_price);
+
+   double entry = (signal > 0) ? t.ask : t.bid;
+   entry = NormalizeDouble(entry, digs);
+   
+   double sl = 0, tp = 0;
+   if(signal > 0)
+   {
+      sl = NormalizeDouble(entry - sl_dist, digs);
+      tp = NormalizeDouble(entry + RiskRewardRatio * (entry - sl), digs);
+   }
+   else if(signal < 0)
+   {
+      sl = NormalizeDouble(entry + sl_dist, digs);
+      tp = NormalizeDouble(entry - RiskRewardRatio * (sl - entry), digs);
+   }
+
+   if(g_lastBarTime != g_last_suppress_log_time)
+   {
+       PrintFormat("%s side=%s bid=%.5f ask=%.5f entry=%.5f pip=%.5f minStop=%.5f buf=%gp(%.5f) sl=%.5f tp=%.5f",
+                   DBG_STOPS, signal > 0 ? "BUY" : "SELL", t.bid, t.ask, entry, pip_size, min_stop_dist,
+                   (double)StopLossBufferPips, buf_price, sl, tp);
+   }
+
+   bool ok_side = (signal > 0) ? (sl < entry && entry < tp) : (tp < entry && entry < sl);
+   bool ok_dist = (MathAbs(entry - sl) >= min_stop_dist) && (MathAbs(tp - entry) >= min_stop_dist);
+
+   if(!ok_side || !ok_dist)
+   {
+      if(g_lastBarTime != g_last_suppress_log_time)
+      {
+         PrintFormat("%s bootstrap=%s reason=stops_invalid side=%s entry=%.5f sl=%.5f tp=%.5f minStop=%.5f buf=%.5f",
+                     EVT_SUPPRESS, is_bootstrap ? "YES" : "NO", signal > 0 ? "BUY" : "SELL", entry, sl, tp, min_stop_dist, buf_price);
+         g_last_suppress_log_time = g_lastBarTime;
+      }
+      return false;
+   }
+
+   double lots_to_trade = CalculateLotSize(confidence, MathAbs(entry - sl));
+   if(lots_to_trade < MinLotSize) return false;
+
+   string signal_str = (signal == 1) ? "BUY" : "SELL";
+   string comment = StringFormat("AAI|C%d|Risk%.1f", confidence, MathAbs(entry - sl) / pip_size);
+   
+   PrintFormat("%s bootstrap=%s mode=%s signal=%s conf=%d/20 allowed=YES",
+               EVT_ENTRY_CHECK, is_bootstrap ? "YES" : "NO", EnumToString(ExecutionMode), signal_str, confidence);
+
+   if(ExecutionMode == AutoExecute)
+   {
+      trade.SetDeviationInPoints(MaxSlippagePoints);
+      bool order_sent = (signal > 0) ? trade.Buy(lots_to_trade, symbolName, entry, sl, tp, comment) : trade.Sell(lots_to_trade, symbolName, entry, sl, tp, comment);
+      
+      if(order_sent && (trade.ResultRetcode() == TRADE_RETCODE_DONE || trade.ResultRetcode() == TRADE_RETCODE_DONE_PARTIAL))
+      {
+         PrintFormat("%s Signal:%s → Executed %.2f lots @%.5f | SL:%.5f TP:%.5f", EVT_ENTRY, signal_str, trade.ResultVolume(), trade.ResultPrice(), sl, tp);
+         return true;
+      }
+      else
+      {
+         if(g_lastBarTime != g_last_suppress_log_time)
+         {
+            PrintFormat("%s bootstrap=%s reason=trade_send_failed retcode=%d", EVT_SUPPRESS, is_bootstrap ? "YES" : "NO", trade.ResultRetcode());
+            g_last_suppress_log_time = g_lastBarTime;
+         }
+         return false;
+      }
+   }
+   
+   return false;
+}
+
+
+//+------------------------------------------------------------------+
+//| Manage open positions                                            |
 //+------------------------------------------------------------------+
 void ManageOpenPositions(const MqlDateTime &loc, bool overnight)
 {
@@ -508,21 +522,21 @@ void ManageOpenPositions(const MqlDateTime &loc, bool overnight)
 }
 
 //+------------------------------------------------------------------+
-//| Handle Partial Profits (logic unchanged)                         |
+//| Handle Partial Profits                                           |
 //+------------------------------------------------------------------+
 void HandlePartialProfits()
 {
    string comment = PositionGetString(POSITION_COMMENT);
    if(StringFind(comment, "|P1") != -1) return;
    string parts[];
-   if(StringSplit(comment, '|', parts) < 4) return;
-   StringReplace(parts[3], "Risk", "");
-   double initial_risk_pips = StringToDouble(parts[3]);
+   if(StringSplit(comment, '|', parts) < 3) return;
+   StringReplace(parts[2], "Risk", "");
+   double initial_risk_pips = StringToDouble(parts[2]);
    if(initial_risk_pips <= 0) return;
    long type = PositionGetInteger(POSITION_TYPE);
    double open_price = PositionGetDouble(POSITION_PRICE_OPEN);
    double current_profit_pips = (type == POSITION_TYPE_BUY) ?
-      PipsFromPrice(SymbolInfoDouble(symbolName, SYMBOL_BID) - open_price) : PipsFromPrice(open_price - SymbolInfoDouble(symbolName, SYMBOL_ASK));
+      (SymbolInfoDouble(symbolName, SYMBOL_BID) - open_price) / PipSize() : (open_price - SymbolInfoDouble(symbolName, SYMBOL_ASK)) / PipSize();
    if(current_profit_pips >= initial_risk_pips * PartialProfitRR)
    {
       ulong ticket = PositionGetInteger(POSITION_TICKET);
@@ -547,7 +561,7 @@ void HandlePartialProfits()
 }
 
 //+------------------------------------------------------------------+
-//| Trailing Stop (logic unchanged)                                  |
+//| Trailing Stop                                                    |
 //+------------------------------------------------------------------+
 void HandleTrailingStop(ulong ticket,long type,double openP,double currSL,double currPrice,bool overnight)
 {
@@ -562,7 +576,7 @@ void HandleTrailingStop(ulong ticket,long type,double openP,double currSL,double
 }
 
 //+------------------------------------------------------------------+
-//| Session Check (logic unchanged)                                  |
+//| Session Check                                                    |
 //+------------------------------------------------------------------+
 bool IsTradingSession()
 {
@@ -573,7 +587,7 @@ bool IsTradingSession()
 }
 
 //+------------------------------------------------------------------+
-//| Journaling Functions (logic unchanged)                           |
+//| Journaling Functions                                             |
 //+------------------------------------------------------------------+
 void WriteJournalHeader()
 {
@@ -626,35 +640,5 @@ void AddToLoggedList(ulong position_id)
    ArrayResize(g_logged_positions, new_size);
    g_logged_positions[new_size - 1] = position_id;
    g_logged_positions_total = new_size;
-}
-
-//+------------------------------------------------------------------+
-//| HELPER: Converts Reason Code to String                           |
-//+------------------------------------------------------------------+
-string ReasonCodeToFullString(ENUM_REASON_CODE code)
-{
-   switch(code)
-   {
-      case REASON_BUY_HTF_CONTINUATION:  return "Buy signal: HTF Continuation.";
-      case REASON_SELL_HTF_CONTINUATION: return "Sell signal: HTF Continuation.";
-      case REASON_BUY_LIQ_GRAB_ALIGNED:  return "Buy signal: Liquidity Grab in Demand Zone with Bias Alignment.";
-      case REASON_SELL_LIQ_GRAB_ALIGNED: return "Sell signal: Liquidity Grab in Supply Zone with Bias Alignment.";
-      default:                           return "N/A";
-   }
-}
-string ReasonCodeToShortString(ENUM_REASON_CODE code)
-{
-   switch(code)
-   {
-      case REASON_BUY_HTF_CONTINUATION:  return "BuyCont";
-      case REASON_SELL_HTF_CONTINUATION: return "SellCont";
-      case REASON_BUY_LIQ_GRAB_ALIGNED:  return "BuyLiqGrab";
-      case REASON_SELL_LIQ_GRAB_ALIGNED: return "SellLiqGrab";
-      case REASON_NO_ZONE:               return "NoZone";
-      case REASON_LOW_ZONE_STRENGTH:     return "LowStrength";
-      case REASON_BIAS_CONFLICT:         return "Conflict";
-      case REASON_TEST_SCENARIO:       return "SafeTest";
-      default:                           return "None";
-   }
 }
 //+------------------------------------------------------------------+
