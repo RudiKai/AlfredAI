@@ -1,12 +1,12 @@
 //+------------------------------------------------------------------+
 //|                     AAI_EA_TradeManager.mq5                      |
-//|                 v3.6 - Hardened Reads & Inputs                   |
+//|           v3.13 - SafeTest Override & Closed-Bar Read            |
 //|         (Takes trade signals from AAI_Indicator_SignalBrain)     |
 //|                                                                  |
 //| Copyright 2025, AlfredAI Project                    |
 //+------------------------------------------------------------------+
 #property strict
-#property version   "3.6"
+#property version   "3.13"
 #property description "Manages trades and logs closed positions to a CSV journal."
 #include <Trade\Trade.mqh>
 
@@ -25,24 +25,15 @@
 #define EVT_FIRST_BAR_OR_NEW "[EVT_FIRST_BAR_OR_NEW]"
 #define EVT_WARN "[EVT_WARN]"
 
-// === BEGIN Spec 1: Constants for buffer indexes ===
-// ==== SignalBrain buffer contract ====
-#define SB_BUF_SIGNAL   0   // -1/0/1
-#define SB_BUF_CONF     1   // 0..20
-#define SB_BUF_REASON   2   // enum (as double)
-#define SB_BUF_ZONETF   3   // seconds
+// === BEGIN Spec: Constants for buffer indexes ===
+#define SB_BUF_SIGNAL   0
+#define SB_BUF_CONF     1
+#define SB_BUF_REASON   2
+#define SB_BUF_ZONETF   3
 
-// ZoneEngine Buffers
-#define ZE_BUF_STATUS    0
-#define ZE_BUF_STRENGTH  2
-#define ZE_BUF_LIQUIDITY 5
-#define ZE_BUF_PROXIMAL  6
-#define ZE_BUF_DISTAL    7
-
-// BiasCompass Buffers
-#define BC_BUF_BIAS 0
-#define BC_BUF_CONF 1
-// === END Spec 1 ===
+#define ZE_BUF_PROXIMAL 6
+#define ZE_BUF_DISTAL   7
+// === END Spec ===
 
 
 //--- Helper Enums (copied from SignalBrain for decoding)
@@ -55,7 +46,8 @@ enum ENUM_REASON_CODE
     REASON_SELL_LIQ_GRAB_ALIGNED,
     REASON_NO_ZONE,
     REASON_LOW_ZONE_STRENGTH,
-    REASON_BIAS_CONFLICT
+    REASON_BIAS_CONFLICT,
+    REASON_TEST_SCENARIO // Added for SafeTest override
 };
 //--- EA Inputs
 enum ENUM_EXECUTION_MODE { SignalsOnly, AutoExecute };
@@ -65,6 +57,7 @@ input int  IndicatorInitRetries = 50;
 input int      MinConfidenceToTrade = 13;
 input ulong    MagicNumber          = 1337;
 input ENUM_TIMEFRAMES SignalTimeframe = PERIOD_CURRENT;
+input int SB_ReadShift = 1; // 0=current, 1=closed bar (default)
 
 // === BEGIN Spec 2: Add EA inputs to forward into SignalBrain ===
 input group "SignalBrain Pass-Through Inputs"
@@ -79,6 +72,11 @@ input int  SB_PassThrough_SlowMA     = 30;     // match SB default (if present)
 input int  SB_PassThrough_MinZoneStrength = 4; // ONLY if SB has this input
 
 // === END Spec 2 ===
+
+//--- Debug Inputs ---
+input group "Debugging"
+input bool Debug_LogSBZE     = true;   // per-bar SB/ZE reads
+input int  Debug_LogEveryN   = 1;      // log cadence in bars (1 = every processed bar)
 
 
 //--- Dynamic Risk & Position Sizing Inputs ---
@@ -118,16 +116,16 @@ static ulong g_logged_positions[];
 int       g_logged_positions_total = 0;
 
 // --- Persistent Indicator Handles ---
-int g_hSignalBrain = INVALID_HANDLE;
-int g_hZoneEngine  = INVALID_HANDLE;
-int g_hBiasCompass = INVALID_HANDLE;
+int sb_handle = INVALID_HANDLE;
+int ze_handle = INVALID_HANDLE;
+int g_hBiasCompass = INVALID_HANDLE; // Kept for future compatibility
 ENUM_TIMEFRAMES g_sbTF = PERIOD_CURRENT;
 
 // --- State Management Globals ---
 static datetime g_lastBarTime = 0;
 static ulong    g_tickCount   = 0;
 static int      g_init_ticks  = 0;
-bool g_SB_Available = false, g_ZE_Available = false, g_BC_Available = false;
+static datetime g_last_wait_log_time = 0;
 bool g_warmup_complete = false;
 bool g_warn_log_flags[10]; // For one-time warnings per buffer index
 
@@ -155,12 +153,14 @@ double PipsFromPrice(double price_diff)
    return price_diff / pip_point;
 }
 
-// === BEGIN Spec 5: Safe CopyBuffer helper ===
-bool ReadOne(const int handle, const int buf, const int shift, double &outVal)
+//+------------------------------------------------------------------+
+//| Safe 1-value reader from any indicator buffer                    |
+//+------------------------------------------------------------------+
+inline bool ReadOne(const int handle, const int buf, const int shift, double &out)
 {
     if(handle == INVALID_HANDLE)
     {
-        outVal = 0.0;
+        out = 0.0;
         return false;
     }
     double tmp[1];
@@ -168,13 +168,13 @@ bool ReadOne(const int handle, const int buf, const int shift, double &outVal)
     int n = CopyBuffer(handle, buf, shift, 1, tmp);
     if(n == 1)
     {
-        outVal = tmp[0];
+        out = tmp[0];
         return true;
     }
-    outVal = 0.0;
+    out = 0.0;
     return false;
 }
-// === END Spec 5 ===
+
 
 //+------------------------------------------------------------------+
 //| Calculate Lot Size                                               |
@@ -219,22 +219,36 @@ int OnInit()
 
    if(EnableJournaling) WriteJournalHeader();
 
-   // === BEGIN Spec 3: Create handles with explicit params ===
-   g_sbTF = SignalTimeframe;
-   
+   // --- Create and store indicator handles with positional inputs ---
    // The order of parameters MUST match the 'input' order in AAI_Indicator_SignalBrain.mq5
-   g_hSignalBrain = iCustom(_Symbol, g_sbTF, "AAI_Indicator_SignalBrain",
-                            SB_PassThrough_MinZoneStrength,
-                            SB_PassThrough_SafeTest,
-                            SB_PassThrough_UseZE,
-                            SB_PassThrough_UseBC);
-
-   g_hZoneEngine  = iCustom(_Symbol, g_sbTF, "AAI_Indicator_ZoneEngine");
+   sb_handle = iCustom(_Symbol, SignalTimeframe, "AAI_Indicator_SignalBrain",
+                       SB_PassThrough_MinZoneStrength,
+                       SB_PassThrough_SafeTest,
+                       SB_PassThrough_UseZE,
+                       SB_PassThrough_UseBC,
+                       SB_PassThrough_WarmupBars,
+                       SB_PassThrough_FastMA,
+                       SB_PassThrough_SlowMA);
    
-   g_hBiasCompass = (UseBiasCompass ? iCustom(_Symbol, g_sbTF, "AAI_Indicator_BiasCompass") : INVALID_HANDLE);
+   ze_handle = iCustom(_Symbol, SignalTimeframe, "AAI_Indicator_ZoneEngine");
+   
+   if(sb_handle == INVALID_HANDLE)
+   {
+      Print("[ERR] SB iCustom handle invalid");
+      return(INIT_FAILED);
+   }
 
-   PrintFormat("%s SB_handle=%d ZE_handle=%d BC_handle=%d TF=%s", EVT_INIT, g_hSignalBrain, g_hZoneEngine, g_hBiasCompass, EnumToString(g_sbTF));
-   // === END Spec 3 ===
+   PrintFormat("[INIT] EA→SB args: SafeTest=%c UseZE=%c UseBC=%c Warmup=%d Fast=%d Slow=%d MinZoneStr=%d | sb_handle=%d",
+               SB_PassThrough_SafeTest ? 'T' : 'F', 
+               SB_PassThrough_UseZE ? 'T' : 'F', 
+               SB_PassThrough_UseBC ? 'T' : 'F',
+               SB_PassThrough_WarmupBars, 
+               SB_PassThrough_FastMA, 
+               SB_PassThrough_SlowMA, 
+               SB_PassThrough_MinZoneStrength,
+               sb_handle);
+               
+   PrintFormat("[INIT] EA reading SB at shift=%d (closed bar if 1)", SB_ReadShift);
 
    EventSetTimer(1);
    return(INIT_SUCCEEDED);
@@ -247,8 +261,8 @@ void OnDeinit(const int reason)
 {
    EventKillTimer();
    PrintFormat("%s Deinitialized. Reason=%d", EVT_INIT, reason);
-   if(g_hSignalBrain != INVALID_HANDLE) IndicatorRelease(g_hSignalBrain);
-   if(g_hZoneEngine != INVALID_HANDLE) IndicatorRelease(g_hZoneEngine);
+   if(sb_handle != INVALID_HANDLE) IndicatorRelease(sb_handle);
+   if(ze_handle != INVALID_HANDLE) IndicatorRelease(ze_handle);
    if(g_hBiasCompass != INVALID_HANDLE) IndicatorRelease(g_hBiasCompass);
 }
 
@@ -288,7 +302,6 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
 void OnTick()
 {
    g_tickCount++;
-   if((g_tickCount % 500) == 0) Print(EVT_TICK);
 
    if(PositionSelect(_Symbol))
    {
@@ -296,51 +309,23 @@ void OnTick()
       TimeToStruct(TimeCurrent(), dt);
       ManageOpenPositions(dt, !IsTradingSession());
    }
-
-   // === BEGIN Spec 4: BarsCalculated waiter (non-blocking, fail-soft) ===
-   if(!g_warmup_complete)
+   
+   int sb_bars = BarsCalculated(sb_handle);
+   if(sb_bars < 2)
    {
-       int sb = (g_hSignalBrain == INVALID_HANDLE ? -1 : BarsCalculated(g_hSignalBrain));
-       int ze = (g_hZoneEngine  == INVALID_HANDLE ? -1 : BarsCalculated(g_hZoneEngine));
-       int bc = (g_hBiasCompass == INVALID_HANDLE ? -1 : BarsCalculated(g_hBiasCompass));
-
-       bool sb_ready = (g_hSignalBrain == INVALID_HANDLE) || (sb >= 1);
-       bool ze_ready = (g_hZoneEngine  == INVALID_HANDLE) || (ze >= 1);
-       bool bc_ready = (!UseBiasCompass) || (g_hBiasCompass == INVALID_HANDLE) || (bc >= 1);
-
-       if(!(sb_ready && ze_ready && bc_ready))
-       {
-           if((g_init_ticks++) % 10 == 0)
-               PrintFormat("%s BarsCalculated SB=%d ZE=%d BC=%d — deferring", EVT_WAIT, sb, ze, bc);
-
-           if(g_init_ticks > IndicatorInitRetries)
-           {
-               PrintFormat("%s Indicator warmup exceeded (%d). Proceeding without: SB=%s ZE=%s BC=%s",
-                           EVT_WARN, IndicatorInitRetries,
-                           sb_ready ? "OK" : "MISSING",
-                           ze_ready ? "OK" : "MISSING",
-                           bc_ready ? "OK" : "MISSING");
-               g_warmup_complete = true; // Force ready state
-           }
-           else
-           {
-               return; // Defer this tick, try again
-           }
-       }
-       else
-       {
-           g_warmup_complete = true; // All indicators are ready
-       }
+      if(TimeCurrent() - g_last_wait_log_time > 60)
+      {
+         PrintFormat("%s BarsCalculated SB=%d — deferring", EVT_WAIT, sb_bars);
+         g_last_wait_log_time = TimeCurrent();
+      }
+      return;
    }
-   // === END Spec 4 ===
 
    datetime t = iTime(_Symbol, SignalTimeframe, 0);
    if(t == 0 || t == g_lastBarTime) return;
    
    if(g_lastBarTime == 0) PrintFormat("%s %s", EVT_FIRST_BAR_OR_NEW, TimeToString(t, TIME_DATE|TIME_MINUTES));
    g_lastBarTime = t;
-
-   if(g_sbTF != SignalTimeframe) { /* Handle TF changes */ }
 
    bool inSession = IsTradingSession();
    if(EnableLogging)
@@ -360,32 +345,55 @@ void CheckForNewTrades(bool inSession)
 {
    if(!inSession) return;
 
-   // === BEGIN Spec 5 & 6: Hardened Reads and Gating ===
-   double sbSig, sbConf, sbReason, sbZoneTf;
-   bool ok0 = ReadOne(g_hSignalBrain, SB_BUF_SIGNAL, 1, sbSig);
-   bool ok1 = ReadOne(g_hSignalBrain, SB_BUF_CONF,   1, sbConf);
-   bool ok2 = ReadOne(g_hSignalBrain, SB_BUF_REASON, 1, sbReason);
-   bool ok3 = ReadOne(g_hSignalBrain, SB_BUF_ZONETF, 1, sbZoneTf);
+   // --- Read SignalBrain and ZoneEngine buffers safely ---
+   const int readShift = MathMax(0, SB_ReadShift);
+   double sbSig=0, sbConf=0, sbReason=0, sbZoneTF=0;
+   
+   bool okSig = ReadOne(sb_handle, SB_BUF_SIGNAL, readShift, sbSig);
+   bool okConf = ReadOne(sb_handle, SB_BUF_CONF, readShift, sbConf);
+   bool okReason = ReadOne(sb_handle, SB_BUF_REASON, readShift, sbReason);
+   bool okZoneTF = ReadOne(sb_handle, SB_BUF_ZONETF, readShift, sbZoneTF);
 
-   // Log read failures only once
-   if(!ok0 && !g_warn_log_flags[SB_BUF_SIGNAL]) { PrintFormat("%s Read failed: SB buf %d", EVT_WARN, SB_BUF_SIGNAL); g_warn_log_flags[SB_BUF_SIGNAL] = true; }
-   if(!ok1 && !g_warn_log_flags[SB_BUF_CONF])   { PrintFormat("%s Read failed: SB buf %d", EVT_WARN, SB_BUF_CONF);   g_warn_log_flags[SB_BUF_CONF]   = true; }
-   if(!ok2 && !g_warn_log_flags[SB_BUF_REASON]) { PrintFormat("%s Read failed: SB buf %d", EVT_WARN, SB_BUF_REASON); g_warn_log_flags[SB_BUF_REASON] = true; }
-   if(!ok3 && !g_warn_log_flags[SB_BUF_ZONETF]) { PrintFormat("%s Read failed: SB buf %d", EVT_WARN, SB_BUF_ZONETF); g_warn_log_flags[SB_BUF_ZONETF] = true; }
+   if(!okSig || !okConf || !okReason || !okZoneTF)
+   {
+      if(!okSig) PrintFormat("%s Read failed: SB buf %d", EVT_WARN, SB_BUF_SIGNAL);
+      if(!okConf) PrintFormat("%s Read failed: SB buf %d", EVT_WARN, SB_BUF_CONF);
+      if(!okReason) PrintFormat("%s Read failed: SB buf %d", EVT_WARN, SB_BUF_REASON);
+      if(!okZoneTF) PrintFormat("%s Read failed: SB buf %d", EVT_WARN, SB_BUF_ZONETF);
+      return;
+   }
+   
+   // --- SafeTest Override ---
+   if(SB_PassThrough_SafeTest)
+   {
+      sbConf = 10.0;
+      sbReason = (double)REASON_TEST_SCENARIO;
+   }
 
+   // --- Debug Logging ---
+   PrintFormat("[DBG_SB] shift=%d sig=%.1f conf=%.1f reason=%g ztf=%g", 
+               readShift, sbSig, sbConf, sbReason, sbZoneTF);
+   
+   double zeProx=0, zeDist=0;
+   ReadOne(ze_handle, ZE_BUF_PROXIMAL, 1, zeProx);
+   ReadOne(ze_handle, ZE_BUF_DISTAL,   1, zeDist);
+   
+   // --- Entry Conditions ---
    int signal = (int)sbSig;
-   if(signal == 0) return; // Gating: No signal, skip entry logic
+   if(signal == 0) return;
 
    int confidence = (int)sbConf;
-   if(MinConfidenceToTrade > 0 && confidence < MinConfidenceToTrade) return; // Gating: Confidence too low
+   if(MinConfidenceToTrade > 0 && confidence < MinConfidenceToTrade) return;
 
-   ENUM_REASON_CODE reasonCode = (ok2 ? (ENUM_REASON_CODE)sbReason : REASON_NONE);
-   // === END Spec 5 & 6 ===
+   ENUM_REASON_CODE reasonCode = (ENUM_REASON_CODE)sbReason;
       
-   double distal_level = 0.0;
-   if(!ReadOne(g_hZoneEngine, ZE_BUF_DISTAL, 1, distal_level) || distal_level == 0.0)
+   if(zeDist == 0.0)
    {
-      if(!g_warn_log_flags[ZE_BUF_DISTAL]) { PrintFormat("%s Read failed or invalid: ZE buf %d", EVT_WARN, ZE_BUF_DISTAL); g_warn_log_flags[ZE_BUF_DISTAL] = true; }
+      if(!g_warn_log_flags[ZE_BUF_DISTAL]) 
+      {
+         PrintFormat("%s Read failed or invalid: ZE buf %d", EVT_WARN, ZE_BUF_DISTAL); 
+         g_warn_log_flags[ZE_BUF_DISTAL] = true; 
+      }
       return;
    }
 
@@ -396,8 +404,8 @@ void CheckForNewTrades(bool inSession)
    double risk_points = 0;
    double lots_to_trade = 0;
 
-   if(signal == 1) { sl = distal_level - sl_buffer_points; risk_points = ask - sl; if(risk_points <= 0) return; tp = ask + risk_points * RiskRewardRatio; }
-   else { sl = distal_level + sl_buffer_points; risk_points = sl - bid; if(risk_points <= 0) return; tp = bid - risk_points * RiskRewardRatio; }
+   if(signal == 1) { sl = zeDist - sl_buffer_points; risk_points = ask - sl; if(risk_points <= 0) return; tp = ask + risk_points * RiskRewardRatio; }
+   else { sl = zeDist + sl_buffer_points; risk_points = sl - bid; if(risk_points <= 0) return; tp = bid - risk_points * RiskRewardRatio; }
 
    lots_to_trade = CalculateLotSize(confidence, risk_points);
    if(lots_to_trade < MinLotSize) return;
@@ -594,6 +602,7 @@ string ReasonCodeToShortString(ENUM_REASON_CODE code)
       case REASON_NO_ZONE:               return "NoZone";
       case REASON_LOW_ZONE_STRENGTH:     return "LowStrength";
       case REASON_BIAS_CONFLICT:         return "Conflict";
+      case REASON_TEST_SCENARIO:       return "SafeTest";
       default:                           return "None";
    }
 }
