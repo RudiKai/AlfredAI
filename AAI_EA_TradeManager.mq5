@@ -1,9 +1,9 @@
 //+------------------------------------------------------------------+
 //|                     AAI_EA_TradeManager.mq5                      |
 //|             v3.32 - Fixed Enum Conflicts & Const Modify Error    |
-//|         (Takes trade signals from AAI_Indicator_SignalBrain)     |
+//|              (Takes trade signals from AAI_Indicator_SignalBrain)     |
 //|                                                                  |
-//| Copyright 2025, AlfredAI Project                    |
+//|              Copyright 2025, AlfredAI Project                    |
 //+------------------------------------------------------------------+
 #property strict
 #property version   "3.32"
@@ -57,14 +57,12 @@ enum ENUM_REASON_CODE
     REASON_BIAS_CONFLICT,
     REASON_TEST_SCENARIO
 };
-
 enum ENUM_EXECUTION_MODE { SignalsOnly, AutoExecute };
 enum ENUM_ENTRY_MODE { FirstBarOrEdge, EdgeOnly };
 enum ENUM_OVEREXT_MODE { HardBlock, WaitForBand };
-enum ENUM_BC_ALIGN_MODE { BC_REQUIRED, BC_PREFERRED }; // FIX: Prefixed
-enum ENUM_ZE_GATE_MODE { ZE_OFF, ZE_PREFERRED, ZE_REQUIRED }; // FIX: Prefixed
+enum ENUM_BC_ALIGN_MODE { BC_REQUIRED, BC_PREFERRED };
+enum ENUM_ZE_GATE_MODE { ZE_GATE_OFF=0, ZE_GATE_PREFERRED=1, ZE_GATE_REQUIRED=2 };
 enum ENUM_OVEREXT_STATE { OK, BLOCK, ARMED, READY, TIMEOUT };
-
 //--- State struct for overextension pullback
 struct OverextArm
 {
@@ -73,7 +71,6 @@ struct OverextArm
    bool     armed;
    int      bars_waited;
 };
-
 //--- EA Inputs
 input ENUM_EXECUTION_MODE ExecutionMode = AutoExecute;
 input ENUM_ENTRY_MODE     EntryMode     = FirstBarOrEdge;
@@ -81,7 +78,6 @@ input int      MinConfidenceToTrade = 4;
 input ulong    MagicNumber          = 1337;
 input ENUM_TIMEFRAMES SignalTimeframe = PERIOD_CURRENT;
 input int SB_ReadShift = 1;
-
 // --- SignalBrain Pass-Through Inputs ---
 input group "SignalBrain Pass-Through Inputs"
 input bool SB_PassThrough_SafeTest   = false;
@@ -100,7 +96,6 @@ input double   MinLotSize           = 0.01;
 input double   MaxLotSize           = 10.0;
 input int      StopLossBufferPips   = 5;
 input double   RiskRewardRatio      = 1.5;
-
 //--- Trade Management Inputs ---
 input group "Trade Management"
 input bool     PerBarDebounce       = true;
@@ -108,7 +103,7 @@ input uint     DuplicateGuardMs     = 300;
 input int      CooldownAfterSLBars  = 2;
 input ENUM_OVEREXT_MODE OverextMode = WaitForBand;
 input int      OverextPullbackBars  = 8;
-input ENUM_BC_ALIGN_MODE BC_AlignMode = BC_PREFERRED; // FIX: Prefixed
+input ENUM_BC_ALIGN_MODE BC_AlignMode = BC_PREFERRED;
 input int      MinATRPoints         = 8;
 input int      MaxOverextPips       = 10;
 input int      OverextMAPeriod      = 10;
@@ -127,16 +122,14 @@ input int      StartMinute        = 0;
 input int      EndHour            = 23;
 input int      EndMinute          = 30;
 input bool     EnableLogging      = true;
-
 //--- ZoneEngine Gating & Telemetry ---
 input group "ZoneEngine Gating & Telemetry"
-input ENUM_ZE_GATE_MODE ZE_GateMode = ZE_REQUIRED; // FIX: Prefixed
+input ENUM_ZE_GATE_MODE ZE_GateMode = ZE_GATE_OFF;
 input double   ZE_MinStrength       = 4.0;
 input int      ZE_PrefBonus         = 2;
 input bool     ZE_TelemetryEnabled    = true;
 input int      ZE_BufferIndexStrength = 2;
 input int      ZE_ReadShift           = 1;
-
 //--- Journaling Inputs ---
 input group "Journaling"
 input bool     EnableJournaling   = true;
@@ -149,10 +142,10 @@ double    point;
 static ulong g_logged_positions[];
 int       g_logged_positions_total = 0;
 static OverextArm g_ox;
-
 // --- Persistent Indicator Handles ---
 int sb_handle = INVALID_HANDLE;
-int ze_handle = INVALID_HANDLE;
+int g_ze_handle = INVALID_HANDLE;
+double g_ze_strength = 0.0;
 int bc_handle = INVALID_HANDLE;
 int g_hATR = INVALID_HANDLE;
 int g_hOverextMA = INVALID_HANDLE;
@@ -164,10 +157,10 @@ static ulong    g_tickCount   = 0;
 bool g_warmup_complete = false;
 bool g_bootstrap_done = false;
 static datetime g_last_entry_bar_buy = 0, g_last_entry_bar_sell = 0;
-static ulong    g_last_send_sig_hash = 0; static ulong g_last_send_ms = 0;
+static ulong    g_last_send_sig_hash = 0;
+static ulong g_last_send_ms = 0;
 static datetime g_cool_until_buy = 0, g_cool_until_sell = 0;
-bool g_is_ze_telemetry_active = false;
-ENUM_ZE_GATE_MODE g_ze_gate_mode; // FIX: Internal state flag
+bool g_ze_ok = true;
 
 //+------------------------------------------------------------------+
 //| Pip Math Helpers                                                 |
@@ -175,7 +168,8 @@ ENUM_ZE_GATE_MODE g_ze_gate_mode; // FIX: Internal state flag
 inline double PipSize()
 {
    const int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
-   return (digits == 3 || digits == 5) ? 10 * _Point : _Point;
+   return (digits == 3 || digits == 5) ?
+   10 * _Point : _Point;
 }
 
 inline double PriceFromPips(double pips)
@@ -197,6 +191,13 @@ ulong StringToULongHash(string s)
     return hash;
 }
 
+string ZE_GateModeToString(ENUM_ZE_GATE_MODE m)
+{
+  if(m==ZE_GATE_OFF)      return "ZE_OFF";
+  if(m==ZE_GATE_PREFERRED) return "ZE_PREFERRED";
+  return "ZE_REQUIRED";
+}
+
 //+------------------------------------------------------------------+
 //| Safe 1-value reader from any indicator buffer                    |
 //+------------------------------------------------------------------+
@@ -207,6 +208,30 @@ inline bool ReadOne(const int handle, const int buf, const int shift, double &ou
     if(CopyBuffer(handle, buf, shift, 1, tmp) == 1){ out = tmp[0]; return true; }
     out = 0.0;
     return false;
+}
+
+//+------------------------------------------------------------------+
+//| Safe updater for ZoneEngine strength                             |
+//+------------------------------------------------------------------+
+void AAI_UpdateZE(datetime t_now)
+{
+   g_ze_strength = 0.0;
+   bool ok = true;
+   if(g_ze_handle==INVALID_HANDLE) ok=false;
+   else
+   {
+      if(BarsCalculated(g_ze_handle) < ZE_ReadShift+1) ok=false;
+      else
+      {
+         double buf[]; ArraySetAsSeries(buf,true);
+         int got = CopyBuffer(g_ze_handle, ZE_BufferIndexStrength, ZE_ReadShift, 1, buf);
+         if(got<1 || !MathIsValidNumber(buf[0])) ok=false; else g_ze_strength = buf[0];
+      }
+   }
+   if(ZE_TelemetryEnabled)
+      PrintFormat("[DBG_ZE] t=%s strength=%.1f ok=%s min=%.1f idx=%d shift=%d",
+                  TimeToString(t_now, TIME_MINUTES), g_ze_strength, ok?"T":"F",
+                  ZE_MinStrength, ZE_BufferIndexStrength, ZE_ReadShift);
 }
 
 
@@ -252,28 +277,18 @@ int OnInit()
    g_ox.armed = false;
    g_last_entry_bar_buy=0; g_last_entry_bar_sell=0; 
    g_cool_until_buy=0; g_cool_until_sell=0;
-
    if(EnableJournaling) WriteJournalHeader();
-
-   g_is_ze_telemetry_active = ZE_TelemetryEnabled;
-   g_ze_gate_mode = ZE_GateMode; // FIX: Initialize internal state from input
 
    sb_handle = iCustom(_Symbol, SignalTimeframe, "AAI_Indicator_SignalBrain",
                        SB_PassThrough_SafeTest, SB_PassThrough_UseZE, SB_PassThrough_UseBC,
                        SB_PassThrough_WarmupBars, SB_PassThrough_FastMA, SB_PassThrough_SlowMA,
                        SB_PassThrough_MinZoneStrength, SB_PassThrough_EnableDebug);
-   
    if(SB_PassThrough_UseBC) bc_handle = iCustom(_Symbol, SignalTimeframe, "AAI_Indicator_BiasCompass");
    
-   if(g_ze_gate_mode != ZE_OFF || g_is_ze_telemetry_active)
+   g_ze_handle = iCustom(_Symbol, SignalTimeframe, "AAI_Indicator_ZoneEngine");
+   if(g_ze_handle == INVALID_HANDLE)
    {
-      ze_handle = iCustom(_Symbol, SignalTimeframe, "AAI_Indicator_ZoneEngine");
-      if(ze_handle == INVALID_HANDLE)
-      {
-         PrintFormat("%s ZE init failed. Disabling all ZE features.", EVT_WARN);
-         g_ze_gate_mode = ZE_OFF; // FIX: Modify internal state, not input
-         g_is_ze_telemetry_active = false;
-      }
+      PrintFormat("%s ZE handle init failed. Telemetry will show strength=0.", EVT_WARN);
    }
    
    if(sb_handle == INVALID_HANDLE){ Print("[ERR] SB iCustom handle invalid"); return(INIT_FAILED); }
@@ -282,7 +297,6 @@ int OnInit()
    PrintFormat("%s EA→SB args: SafeTest=%c UseZE=%c UseBC=%c Warmup=%d | sb_handle=%d",
                EVT_INIT, SB_PassThrough_SafeTest ? 'T' : 'F', SB_PassThrough_UseZE ? 'T' : 'F', 
                SB_PassThrough_UseBC ? 'T' : 'F', SB_PassThrough_WarmupBars, sb_handle);
-               
    g_hATR = iATR(_Symbol, _Period, 14);
    if(g_hATR == INVALID_HANDLE){ Print("[ERR] Failed to create ATR indicator handle"); return(INIT_FAILED); }
    
@@ -301,7 +315,7 @@ void OnDeinit(const int reason)
    EventKillTimer();
    PrintFormat("%s Deinitialized. Reason=%d", EVT_INIT, reason);
    if(sb_handle != INVALID_HANDLE) IndicatorRelease(sb_handle);
-   if(ze_handle != INVALID_HANDLE) IndicatorRelease(ze_handle);
+   if(g_ze_handle != INVALID_HANDLE) IndicatorRelease(g_ze_handle);
    if(bc_handle != INVALID_HANDLE) IndicatorRelease(bc_handle);
    if(g_hATR != INVALID_HANDLE) IndicatorRelease(g_hATR);
    if(g_hOverextMA != INVALID_HANDLE) IndicatorRelease(g_hOverextMA);
@@ -342,7 +356,6 @@ void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest 
            long closing_deal_type = HistoryDealGetInteger(trans.deal, DEAL_TYPE);
            datetime bar_time = iTime(_Symbol, _Period, 0);
            datetime cooldown_end_time = bar_time + CooldownAfterSLBars * PeriodSeconds(_Period);
-
            if (closing_deal_type == DEAL_TYPE_SELL) // Closed a BUY position
            {
                g_cool_until_buy = cooldown_end_time;
@@ -383,7 +396,6 @@ void OnTick()
    
    datetime bar_time = iTime(_Symbol, _Period, SB_ReadShift);
    if(bar_time == 0 || bar_time == g_lastBarTime) return;
-   
    g_lastBarTime = bar_time;
    
    CheckForNewTrades();
@@ -404,22 +416,7 @@ void CheckForNewTrades()
    
    int direction = (sbSig_curr > 0) ? 1 : (sbSig_curr < 0 ? -1 : 0);
 
-   double ze_strength = EMPTY_VALUE;
-   if(g_is_ze_telemetry_active || g_ze_gate_mode != ZE_OFF)
-   {
-      if(BarsCalculated(ze_handle) >= ZE_ReadShift + 1)
-      {
-         if(!ReadOne(ze_handle, ZE_BufferIndexStrength, ZE_ReadShift, ze_strength))
-         {
-            PrintFormat("%s Read failed: ZE buf %d", EVT_WARN, ZE_BufferIndexStrength);
-         }
-         if(g_is_ze_telemetry_active) PrintFormat("%s t=%s strength=%.1f", DBG_ZE, TimeToString(g_lastBarTime), ze_strength);
-      }
-      else
-      {
-         PrintFormat("%s BarsCalculated ZE=%d", EVT_WAIT, BarsCalculated(ze_handle));
-      }
-   }
+   AAI_UpdateZE(g_lastBarTime);
 
    if(direction == 0) {
       if(g_lastBarTime != g_last_suppress_log_time){
@@ -430,13 +427,16 @@ void CheckForNewTrades()
    }
 
    double atr_val=0, fast_ma_val=0, close_price=0;
-   double atr_buffer[1]; if(CopyBuffer(g_hATR, 0, readShift, 1, atr_buffer) > 0) atr_val = atr_buffer[0];
-   double ma_buffer[1]; if(CopyBuffer(g_hOverextMA, 0, readShift, 1, ma_buffer) > 0) fast_ma_val = ma_buffer[0];
-   MqlRates rates[1]; if(CopyRates(_Symbol, _Period, readShift, 1, rates) > 0) close_price = rates[0].close;
+   double atr_buffer[1];
+   if(CopyBuffer(g_hATR, 0, readShift, 1, atr_buffer) > 0) atr_val = atr_buffer[0];
+   double ma_buffer[1];
+   if(CopyBuffer(g_hOverextMA, 0, readShift, 1, ma_buffer) > 0) fast_ma_val = ma_buffer[0];
+   MqlRates rates[1];
+   if(CopyRates(_Symbol, _Period, readShift, 1, rates) > 0) close_price = rates[0].close;
    
    const double pip = PipSize();
    double over_p = (fast_ma_val > 0 && close_price > 0) ? MathAbs(close_price - fast_ma_val) / pip : 0.0;
-
+   
    // --- Compute Gates (in order) ---
    bool sess_ok = IsTradingSession();
    bool spread_ok = (MaxSpreadPoints == 0 || (int)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD) <= MaxSpreadPoints);
@@ -451,13 +451,28 @@ void CheckForNewTrades()
       }
    }
 
-   bool ze_has = (ze_strength != EMPTY_VALUE && !MathIsValidNumber(ze_strength)==false);
-   bool ze_ok  = ze_has && (ze_strength >= ZE_MinStrength);
-   
+   g_ze_ok = true;
    int conf_eff = (int)sbConf;
-   if (g_ze_gate_mode == ZE_PREFERRED && ze_ok) conf_eff = (int)MathMin(20, sbConf + ZE_PrefBonus);
-   bool conf_ok = (conf_eff >= MinConfidenceToTrade);
 
+   switch(ZE_GateMode)
+   {
+       case ZE_GATE_OFF:
+           g_ze_ok = true;
+           break;
+       case ZE_GATE_REQUIRED:
+           g_ze_ok = (g_ze_strength >= ZE_MinStrength);
+           break;
+       case ZE_GATE_PREFERRED:
+           g_ze_ok = true;
+           if(g_ze_strength >= ZE_MinStrength)
+           {
+               conf_eff += ZE_PrefBonus;
+           }
+           break;
+   }
+   conf_eff = (int)MathMin(20, conf_eff); // Clamp effective confidence
+   bool conf_ok = (conf_eff >= MinConfidenceToTrade);
+   
    ENUM_OVEREXT_STATE over_state = OK;
    if(MaxOverextPips > 0){
       if(OverextMode == HardBlock) over_state = (over_p <= MaxOverextPips) ? OK : BLOCK;
@@ -469,7 +484,8 @@ void CheckForNewTrades()
          } else {
             if(over_p <= MaxOverextPips) over_state = OK;
             else { 
-               g_ox.armed=true; g_ox.side=direction; g_ox.until=g_lastBarTime+OverextPullbackBars*PeriodSeconds(); g_ox.bars_waited=0;
+               g_ox.armed=true; g_ox.side=direction; g_ox.until=g_lastBarTime+OverextPullbackBars*PeriodSeconds();
+               g_ox.bars_waited=0;
                over_state = ARMED;
             }
          }
@@ -482,19 +498,17 @@ void CheckForNewTrades()
    int bars_left = (delta <= 0 || secs <= 0) ? 0 : ( (delta + secs - 1) / secs );
    bool cool_ok = (bars_left == 0);
    bool perbar_ok = !PerBarDebounce || ((direction > 0) ? (g_last_entry_bar_buy != g_lastBarTime) : (g_last_entry_bar_sell != g_lastBarTime));
-
    // --- DBG_GATES Log ---
    PrintFormat("%s t=%s sig_prev=%d sig_curr=%d conf=%.0f/%.0f over_p=%.1f bc_mode=%s ox_armed=%s ox_wait=%d samebar=%s cool=%s ze_ok=%s",
                DBG_GATES, TimeToString(g_lastBarTime), (int)sbSig_prev, (int)sbSig_curr, sbConf, (double)conf_eff, over_p, 
-               EnumToString(BC_AlignMode), g_ox.armed ? "T" : "F", g_ox.bars_waited, !perbar_ok ? "T" : "F", !cool_ok ? "T" : "F", ze_ok ? "T" : "F");
-
+               EnumToString(BC_AlignMode), g_ox.armed ? "T" : "F", g_ox.bars_waited, !perbar_ok ? "T" : "F", !cool_ok ? "T" : "F", g_ze_ok ? "T" : "F");
    // --- Hard Enforcement & Suppression ---
    string suppress_reason = "";
    if(!sess_ok) suppress_reason = "session";
    else if(!spread_ok) suppress_reason = "spread";
    else if(!atr_ok) suppress_reason = "atr";
    else if(!bc_ok) suppress_reason = "bc";
-   else if(g_ze_gate_mode == ZE_REQUIRED && !ze_ok) suppress_reason = StringFormat("ze_gate strength=%.1f min=%.1f", ze_strength, ZE_MinStrength);
+   else if(!g_ze_ok) suppress_reason = StringFormat("ze_gate strength=%.2f min=%.2f", g_ze_strength, ZE_MinStrength);
    else if(!conf_ok) suppress_reason = "confidence";
    else if(over_state == BLOCK) suppress_reason = StringFormat("overext_block over=%.1fp max=%dp", over_p, MaxOverextPips);
    else if(over_state == ARMED) {
@@ -506,7 +520,6 @@ void CheckForNewTrades()
       return;
    }
    else if(over_state == TIMEOUT) suppress_reason = StringFormat("overext_timeout waited=%d", g_ox.bars_waited);
-   
    if(suppress_reason != ""){
       if(g_lastBarTime != g_last_suppress_log_time){
          PrintFormat("%s reason=%s", EVT_SUPPRESS, suppress_reason);
@@ -550,13 +563,12 @@ void CheckForNewTrades()
    {
       string gates_summary = StringFormat("sess:%s,spd:%s,atr:%s,bc:%s,ze:%s,over:%s,cool:%s,bar:%s,mode:%s",
                                           sess_ok?"T":"F", spread_ok?"T":"F", atr_ok?"T":"F", bc_ok?"T":"F",
-                                          ze_ok?"T":"F", over_state==OK||over_state==READY?"T":"F", cool_ok?"T":"F", perbar_ok?"T":"F",
-                                          EnumToString(g_ze_gate_mode));
-      
+                                 
+                   g_ze_ok?"T":"F", over_state==OK||over_state==READY?"T":"F", cool_ok?"T":"F", perbar_ok?"T":"F",
+                                          ZE_GateModeToString(ZE_GateMode));
       PrintFormat("%s trigger=%s side=%s conf=%.0f/%.0f/20 gates={%s}", EVT_ENTRY_CHECK, trigger, 
                   direction > 0 ? "BUY" : "SELL", sbConf, (double)conf_eff, gates_summary);
-      
-      if(TryOpenPosition(direction, (int)sbConf))
+      if(TryOpenPosition(direction, (int)conf_eff))
       {
          if(trigger == "bootstrap") g_bootstrap_done = true;
          if(trigger == "pullback") g_ox.armed = false;
@@ -607,10 +619,8 @@ bool TryOpenPosition(int signal, int confidence)
    PrintFormat("%s side=%s bid=%.5f ask=%.5f entry=%.5f pip=%.5f minStop=%.5f buf=%gp(%.5f) sl=%.5f tp=%.5f",
                DBG_STOPS, signal > 0 ? "BUY" : "SELL", t.bid, t.ask, entry, pip_size, min_stop_dist,
                (double)StopLossBufferPips, buf_price, sl, tp);
-
    bool ok_side = (signal > 0) ? (sl < entry && entry < tp) : (tp < entry && entry < sl);
    bool ok_dist = (MathAbs(entry - sl) >= min_stop_dist) && (MathAbs(tp - entry) >= min_stop_dist);
-
    if(!ok_side || !ok_dist){
       if(g_lastBarTime != g_last_suppress_log_time){
          PrintFormat("%s reason=stops_invalid details=side:%s entry:%.5f sl:%.5f tp:%.5f", EVT_SUPPRESS, signal > 0 ? "BUY" : "SELL", entry, sl, tp);
@@ -621,16 +631,13 @@ bool TryOpenPosition(int signal, int confidence)
 
    double lots_to_trade = CalculateLotSize(confidence, MathAbs(entry - sl));
    if(lots_to_trade < MinLotSize) return false;
-
    string signal_str = (signal == 1) ? "BUY" : "SELL";
    string comment = StringFormat("AAI|C%d|Risk%.1f", confidence, MathAbs(entry - sl) / pip_size);
-   
    if(ExecutionMode == AutoExecute){
       g_last_send_sig_hash = sig_h;
       g_last_send_ms = now_ms;
       trade.SetDeviationInPoints(MaxSlippagePoints);
       bool order_sent = (signal > 0) ? trade.Buy(lots_to_trade, symbolName, entry, sl, tp, comment) : trade.Sell(lots_to_trade, symbolName, entry, sl, tp, comment);
-      
       if(order_sent && (trade.ResultRetcode() == TRADE_RETCODE_DONE || trade.ResultRetcode() == TRADE_RETCODE_DONE_PARTIAL)){
          PrintFormat("%s Signal:%s → Executed %.2f lots @%.5f | SL:%.5f TP:%.5f", EVT_ENTRY, signal_str, trade.ResultVolume(), trade.ResultPrice(), sl, tp);
          if(signal > 0) g_last_entry_bar_buy = g_lastBarTime; else g_last_entry_bar_sell = g_lastBarTime;
@@ -685,8 +692,7 @@ void HandlePartialProfits()
    if(initial_risk_pips <= 0) return;
    long type = PositionGetInteger(POSITION_TYPE);
    double open_price = PositionGetDouble(POSITION_PRICE_OPEN);
-   double current_profit_pips = (type == POSITION_TYPE_BUY) ?
-      (SymbolInfoDouble(symbolName, SYMBOL_BID) - open_price) / PipSize() : (open_price - SymbolInfoDouble(symbolName, SYMBOL_ASK)) / PipSize();
+   double current_profit_pips = (type == POSITION_TYPE_BUY) ? (SymbolInfoDouble(symbolName, SYMBOL_BID) - open_price) / PipSize() : (open_price - SymbolInfoDouble(symbolName, SYMBOL_ASK)) / PipSize();
    if(current_profit_pips >= initial_risk_pips * PartialProfitRR)
    {
       ulong ticket = PositionGetInteger(POSITION_TICKET);
@@ -743,7 +749,7 @@ void WriteJournalHeader()
 {
    if(FileIsExist(JournalFileName, 0)) return;
    int handle = FileOpen(JournalFileName, FILE_WRITE|FILE_CSV|FILE_ANSI, ",");
-   if(handle != INVALID_HANDLE) { FileWriteString(handle, "PositionID,Symbol,Type,Volume,EntryTime,EntryPrice,ExitTime,ExitPrice,Commission,Swap,Profit,Comment\n"); FileClose(handle); }
+   if(handle != INVALID_HANDLE) { FileWriteString(handle, "PositionID,Symbol,Type,Volume,EntryTime,EntryPrice,ExitTime,ExitPrice,Commission,Swap,Profit,Comment,ZE_Mode,ZE_Strength,ZE_OK\n"); FileClose(handle); }
 }
 void LogClosedPosition(ulong position_id)
 {
@@ -773,8 +779,12 @@ void LogClosedPosition(ulong position_id)
    }
    if(pos_sym=="") return;
    StringReplace(pos_comm, ",", ";");
-   string csv_line = StringFormat("%d,%s,%s,%.2f,%s,%.5f,%s,%.5f,%.2f,%.2f,%.2f,%s", position_id, pos_sym, (pos_type==ORDER_TYPE_BUY?"BUY":"SELL"),
-      total_vol, TimeToString(entry_t), entry_p, TimeToString(exit_t), exit_p, total_comm, total_swap, total_profit, pos_comm);
+   string csv_line = StringFormat("%d,%s,%s,%.2f,%s,%.5f,%s,%.5f,%.2f,%.2f,%.2f,%s,%s,%.2f,%s", 
+      position_id, pos_sym, (pos_type==ORDER_TYPE_BUY?"BUY":"SELL"),
+      total_vol, TimeToString(entry_t), entry_p, TimeToString(exit_t), exit_p, 
+      total_comm, total_swap, total_profit, pos_comm,
+      ZE_GateModeToString(ZE_GateMode), g_ze_strength, g_ze_ok ? "T" : "F");
+
    int handle = FileOpen(JournalFileName, FILE_READ|FILE_WRITE|FILE_CSV|FILE_ANSI, ",");
    if(handle!=INVALID_HANDLE) { FileSeek(handle,0,SEEK_END); FileWriteString(handle,csv_line+"\n"); FileClose(handle); }
 }
