@@ -6,7 +6,7 @@
 //|              Copyright 2025, AlfredAI Project                    |
 //+------------------------------------------------------------------+
 #property strict
-#property version   "3.32"
+#property version   "3.37" // As Coder, incremented version for this change
 #property description "Manages trades and logs closed positions to a CSV journal."
 #include <Trade\Trade.mqh>
 #include <Arrays\ArrayLong.mqh>
@@ -37,10 +37,6 @@
 #define SB_BUF_REASON   2
 #define SB_BUF_ZONETF   3
 #define BC_BUF_HTF_BIAS 0
-#define ZE_BUF_STATUS   0
-
-#define ZE_BUF_PROXIMAL 6
-#define ZE_BUF_DISTAL   7
 // === END Spec ===
 
 
@@ -87,7 +83,7 @@ input int  SB_PassThrough_WarmupBars = 150;
 input int  SB_PassThrough_FastMA     = 10;
 input int  SB_PassThrough_SlowMA     = 30;
 input int  SB_PassThrough_MinZoneStrength = 4;
-input bool SB_PassThrough_EnableDebug = true; 
+input bool SB_PassThrough_EnableDebug = true;
 
 //--- Risk Management Inputs ---
 input group "Risk Management"
@@ -128,12 +124,13 @@ input ENUM_ZE_GATE_MODE ZE_GateMode = ZE_GATE_OFF;
 input double   ZE_MinStrength       = 4.0;
 input int      ZE_PrefBonus         = 2;
 input bool     ZE_TelemetryEnabled    = true;
-input int      ZE_BufferIndexStrength = 2;
+input int      ZE_BufferIndexStrength = 0;
 input int      ZE_ReadShift           = 1;
 //--- Journaling Inputs ---
 input group "Journaling"
-input bool     EnableJournaling   = true;
-input string   JournalFileName    = "AlfredAI_Journal.csv";
+input bool     EnableJournaling     = true;
+input string   JournalFileName      = "AlfredAI_Journal.csv";
+input bool     JournalUseCommonFiles = true;
 
 //--- Globals
 CTrade    trade;
@@ -149,7 +146,6 @@ double g_ze_strength = 0.0;
 int bc_handle = INVALID_HANDLE;
 int g_hATR = INVALID_HANDLE;
 int g_hOverextMA = INVALID_HANDLE;
-
 // --- State Management Globals ---
 static datetime g_lastBarTime = 0;
 static datetime g_last_suppress_log_time = 0;
@@ -161,6 +157,7 @@ static ulong    g_last_send_sig_hash = 0;
 static ulong g_last_send_ms = 0;
 static datetime g_cool_until_buy = 0, g_cool_until_sell = 0;
 bool g_ze_ok = true;
+static bool g_ze_fallback_logged = false;
 
 //+------------------------------------------------------------------+
 //| Pip Math Helpers                                                 |
@@ -168,8 +165,7 @@ bool g_ze_ok = true;
 inline double PipSize()
 {
    const int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
-   return (digits == 3 || digits == 5) ?
-   10 * _Point : _Point;
+   return (digits == 3 || digits == 5) ? 10 * _Point : _Point;
 }
 
 inline double PriceFromPips(double pips)
@@ -216,22 +212,35 @@ inline bool ReadOne(const int handle, const int buf, const int shift, double &ou
 void AAI_UpdateZE(datetime t_now)
 {
    g_ze_strength = 0.0;
-   bool ok = true;
-   if(g_ze_handle==INVALID_HANDLE) ok=false;
-   else
+   if(g_ze_handle == INVALID_HANDLE) return;
+
+   if(BarsCalculated(g_ze_handle) < ZE_ReadShift + 1)
    {
-      if(BarsCalculated(g_ze_handle) < ZE_ReadShift+1) ok=false;
-      else
+      PrintFormat("%s BarsCalculated ZE=%d", EVT_WAIT, BarsCalculated(g_ze_handle));
+      return;
+   }
+
+   double ze_buf[1];
+   if(CopyBuffer(g_ze_handle, ZE_BufferIndexStrength, ZE_ReadShift, 1, ze_buf) < 1)
+   {
+      PrintFormat("%s ZE CopyBuffer failed (buf=%d shift=%d), Error: %d", EVT_WARN, ZE_BufferIndexStrength, ZE_ReadShift, GetLastError());
+      // One-time fallback attempt to buffer 0 if the input was wrong
+      if(!g_ze_fallback_logged && ZE_BufferIndexStrength != 0)
       {
-         double buf[]; ArraySetAsSeries(buf,true);
-         int got = CopyBuffer(g_ze_handle, ZE_BufferIndexStrength, ZE_ReadShift, 1, buf);
-         if(got<1 || !MathIsValidNumber(buf[0])) ok=false; else g_ze_strength = buf[0];
+          g_ze_fallback_logged = true;
+          if(CopyBuffer(g_ze_handle, 0, ZE_ReadShift, 1, ze_buf) >= 1)
+          {
+              g_ze_strength = ze_buf[0];
+          }
       }
    }
+   else
+   {
+      g_ze_strength = ze_buf[0];
+   }
+
    if(ZE_TelemetryEnabled)
-      PrintFormat("[DBG_ZE] t=%s strength=%.1f ok=%s min=%.1f idx=%d shift=%d",
-                  TimeToString(t_now, TIME_MINUTES), g_ze_strength, ok?"T":"F",
-                  ZE_MinStrength, ZE_BufferIndexStrength, ZE_ReadShift);
+      PrintFormat("[DBG_ZE] t=%s strength=%.1f", TimeToString(t_now, TIME_DATE|TIME_MINUTES), g_ze_strength);
 }
 
 
@@ -275,31 +284,31 @@ int OnInit()
    point = SymbolInfoDouble(symbolName, SYMBOL_POINT);
    trade.SetExpertMagicNumber(MagicNumber);
    g_ox.armed = false;
-   g_last_entry_bar_buy=0; g_last_entry_bar_sell=0; 
+   g_last_entry_bar_buy=0; g_last_entry_bar_sell=0;
    g_cool_until_buy=0; g_cool_until_sell=0;
-   if(EnableJournaling) WriteJournalHeader();
 
    sb_handle = iCustom(_Symbol, SignalTimeframe, "AAI_Indicator_SignalBrain",
                        SB_PassThrough_SafeTest, SB_PassThrough_UseZE, SB_PassThrough_UseBC,
                        SB_PassThrough_WarmupBars, SB_PassThrough_FastMA, SB_PassThrough_SlowMA,
                        SB_PassThrough_MinZoneStrength, SB_PassThrough_EnableDebug);
    if(SB_PassThrough_UseBC) bc_handle = iCustom(_Symbol, SignalTimeframe, "AAI_Indicator_BiasCompass");
-   
+
    g_ze_handle = iCustom(_Symbol, SignalTimeframe, "AAI_Indicator_ZoneEngine");
    if(g_ze_handle == INVALID_HANDLE)
    {
       PrintFormat("%s ZE handle init failed. Telemetry will show strength=0.", EVT_WARN);
    }
-   
+
    if(sb_handle == INVALID_HANDLE){ Print("[ERR] SB iCustom handle invalid"); return(INIT_FAILED); }
-   
+
    PrintFormat("%s EntryMode=%s", EVT_INIT, EnumToString(EntryMode));
+   PrintFormat("%s ZE gate=%s buf=%d shift=%d min=%.1f bonus=%d handle=%d", EVT_INIT, ZE_GateModeToString(ZE_GateMode), ZE_BufferIndexStrength, ZE_ReadShift, ZE_MinStrength, ZE_PrefBonus, g_ze_handle);
    PrintFormat("%s EA→SB args: SafeTest=%c UseZE=%c UseBC=%c Warmup=%d | sb_handle=%d",
-               EVT_INIT, SB_PassThrough_SafeTest ? 'T' : 'F', SB_PassThrough_UseZE ? 'T' : 'F', 
+               EVT_INIT, SB_PassThrough_SafeTest ? 'T' : 'F', SB_PassThrough_UseZE ? 'T' : 'F',
                SB_PassThrough_UseBC ? 'T' : 'F', SB_PassThrough_WarmupBars, sb_handle);
    g_hATR = iATR(_Symbol, _Period, 14);
    if(g_hATR == INVALID_HANDLE){ Print("[ERR] Failed to create ATR indicator handle"); return(INIT_FAILED); }
-   
+
    g_hOverextMA = iMA(_Symbol, _Period, OverextMAPeriod, 0, MODE_SMA, PRICE_CLOSE);
    if(g_hOverextMA == INVALID_HANDLE){ Print("[ERR] Failed to create Overextension MA handle"); return(INIT_FAILED); }
 
@@ -341,7 +350,7 @@ void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest 
          ulong pos_id = HistoryDealGetInteger(trans.deal, DEAL_POSITION_ID);
          if(!PositionSelectByTicket(pos_id) && !IsPositionLogged(pos_id))
          {
-            LogClosedPosition(pos_id);
+            JournalClosedPosition(pos_id);
             AddToLoggedList(pos_id);
          }
       }
@@ -383,7 +392,7 @@ void OnTick()
       TimeToStruct(TimeCurrent(), dt);
       ManageOpenPositions(dt, !IsTradingSession());
    }
-   
+
    if(!g_warmup_complete)
    {
        if(Bars(_Symbol, SignalTimeframe) > SB_PassThrough_WarmupBars)
@@ -393,11 +402,11 @@ void OnTick()
        }
        else return;
    }
-   
+
    datetime bar_time = iTime(_Symbol, _Period, SB_ReadShift);
    if(bar_time == 0 || bar_time == g_lastBarTime) return;
    g_lastBarTime = bar_time;
-   
+
    CheckForNewTrades();
 }
 
@@ -408,16 +417,16 @@ void OnTick()
 void CheckForNewTrades()
 {
    const int readShift = MathMax(1, SB_ReadShift);
-   double sbSig_curr=0, sbConf=0, sbSig_prev=0;
-   
+   double sbSig_curr=0, sbConf=0, sbSig_prev=0, sbReason=0;
+
    ReadOne(sb_handle, SB_BUF_SIGNAL, readShift, sbSig_curr);
    if(!ReadOne(sb_handle, SB_BUF_SIGNAL, readShift + 1, sbSig_prev)) sbSig_prev = sbSig_curr;
    ReadOne(sb_handle, SB_BUF_CONF, readShift, sbConf);
-   
+   ReadOne(sb_handle, SB_BUF_REASON, readShift, sbReason);
+
    int direction = (sbSig_curr > 0) ? 1 : (sbSig_curr < 0 ? -1 : 0);
 
    AAI_UpdateZE(g_lastBarTime);
-
    if(direction == 0) {
       if(g_lastBarTime != g_last_suppress_log_time){
          PrintFormat("%s reason=no_signal", EVT_SUPPRESS);
@@ -433,15 +442,14 @@ void CheckForNewTrades()
    if(CopyBuffer(g_hOverextMA, 0, readShift, 1, ma_buffer) > 0) fast_ma_val = ma_buffer[0];
    MqlRates rates[1];
    if(CopyRates(_Symbol, _Period, readShift, 1, rates) > 0) close_price = rates[0].close;
-   
+
    const double pip = PipSize();
    double over_p = (fast_ma_val > 0 && close_price > 0) ? MathAbs(close_price - fast_ma_val) / pip : 0.0;
-   
    // --- Compute Gates (in order) ---
    bool sess_ok = IsTradingSession();
    bool spread_ok = (MaxSpreadPoints == 0 || (int)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD) <= MaxSpreadPoints);
    bool atr_ok = (MinATRPoints == 0) || (atr_val >= MinATRPoints * point);
-   
+
    bool bc_ok = !SB_PassThrough_UseBC;
    if(SB_PassThrough_UseBC){
       double htf_bias=0;
@@ -463,27 +471,31 @@ void CheckForNewTrades()
            g_ze_ok = (g_ze_strength >= ZE_MinStrength);
            break;
        case ZE_GATE_PREFERRED:
-           g_ze_ok = true;
-           if(g_ze_strength >= ZE_MinStrength)
+           g_ze_ok = (g_ze_strength >= ZE_MinStrength);
+           if(g_ze_ok)
            {
                conf_eff += ZE_PrefBonus;
            }
            break;
    }
-   conf_eff = (int)MathMin(20, conf_eff); // Clamp effective confidence
+   conf_eff = (int)MathMin(20, conf_eff);
+   // Clamp effective confidence
    bool conf_ok = (conf_eff >= MinConfidenceToTrade);
-   
+
    ENUM_OVEREXT_STATE over_state = OK;
    if(MaxOverextPips > 0){
       if(OverextMode == HardBlock) over_state = (over_p <= MaxOverextPips) ? OK : BLOCK;
       else { // WaitForBand
          if(g_ox.armed){
-            if(direction != g_ox.side || g_lastBarTime > g_ox.until) { over_state = TIMEOUT; g_ox.armed = false; }
-            else if(over_p <= MaxOverextPips) { over_state = READY; }
-            else { g_ox.bars_waited++; over_state = ARMED; }
+            if(direction != g_ox.side || g_lastBarTime > g_ox.until) { over_state = TIMEOUT;
+            g_ox.armed = false; }
+            else if(over_p <= MaxOverextPips) { over_state = READY;
+            }
+            else { g_ox.bars_waited++; over_state = ARMED;
+            }
          } else {
             if(over_p <= MaxOverextPips) over_state = OK;
-            else { 
+            else {
                g_ox.armed=true; g_ox.side=direction; g_ox.until=g_lastBarTime+OverextPullbackBars*PeriodSeconds();
                g_ox.bars_waited=0;
                over_state = ARMED;
@@ -491,7 +503,7 @@ void CheckForNewTrades()
          }
       }
    }
-   
+
    int secs = PeriodSeconds();
    datetime until = (direction > 0) ? g_cool_until_buy : g_cool_until_sell;
    int delta = (int)(until - g_lastBarTime);
@@ -499,21 +511,21 @@ void CheckForNewTrades()
    bool cool_ok = (bars_left == 0);
    bool perbar_ok = !PerBarDebounce || ((direction > 0) ? (g_last_entry_bar_buy != g_lastBarTime) : (g_last_entry_bar_sell != g_lastBarTime));
    // --- DBG_GATES Log ---
-   PrintFormat("%s t=%s sig_prev=%d sig_curr=%d conf=%.0f/%.0f over_p=%.1f bc_mode=%s ox_armed=%s ox_wait=%d samebar=%s cool=%s ze_ok=%s",
-               DBG_GATES, TimeToString(g_lastBarTime), (int)sbSig_prev, (int)sbSig_curr, sbConf, (double)conf_eff, over_p, 
-               EnumToString(BC_AlignMode), g_ox.armed ? "T" : "F", g_ox.bars_waited, !perbar_ok ? "T" : "F", !cool_ok ? "T" : "F", g_ze_ok ? "T" : "F");
+   PrintFormat("%s t=%s sig_prev=%d sig_curr=%d conf=%.0f/%.0f over_p=%.1f bc_mode=%s ox_armed=%s ox_wait=%d samebar=%s cool=%s ze_ok=%s ze_strength=%.1f",
+               DBG_GATES, TimeToString(g_lastBarTime), (int)sbSig_prev, (int)sbSig_curr, sbConf, (double)conf_eff, over_p,
+               EnumToString(BC_AlignMode), g_ox.armed ? "T" : "F", g_ox.bars_waited, !perbar_ok ? "T" : "F", !cool_ok ? "T" : "F", g_ze_ok ? "T" : "F", g_ze_strength);
    // --- Hard Enforcement & Suppression ---
    string suppress_reason = "";
    if(!sess_ok) suppress_reason = "session";
    else if(!spread_ok) suppress_reason = "spread";
    else if(!atr_ok) suppress_reason = "atr";
    else if(!bc_ok) suppress_reason = "bc";
-   else if(!g_ze_ok) suppress_reason = StringFormat("ze_gate strength=%.2f min=%.2f", g_ze_strength, ZE_MinStrength);
+   else if(ZE_GateMode == ZE_GATE_REQUIRED && !g_ze_ok) suppress_reason = StringFormat("ze_gate strength=%.1f min=%.1f", g_ze_strength, ZE_MinStrength);
    else if(!conf_ok) suppress_reason = "confidence";
    else if(over_state == BLOCK) suppress_reason = StringFormat("overext_block over=%.1fp max=%dp", over_p, MaxOverextPips);
    else if(over_state == ARMED) {
       if(g_lastBarTime != g_last_suppress_log_time){
-         PrintFormat("%s reason=overext_armed side=%s over=%.1fp max=%dp wait_bars=%d", EVT_SUPPRESS, 
+         PrintFormat("%s reason=overext_armed side=%s over=%.1fp max=%dp wait_bars=%d", EVT_SUPPRESS,
                      direction > 0 ? "BUY" : "SELL", over_p, MaxOverextPips, OverextPullbackBars);
          g_last_suppress_log_time = g_lastBarTime;
       }
@@ -542,7 +554,7 @@ void CheckForNewTrades()
       }
       return;
    }
-   
+
    if(!cool_ok){
       if(g_lastBarTime != g_last_suppress_log_time){
          PrintFormat("%s reason=cooldown side=%s bars_left=%d", EVT_SUPPRESS, direction > 0 ? "BUY" : "SELL", bars_left);
@@ -563,12 +575,11 @@ void CheckForNewTrades()
    {
       string gates_summary = StringFormat("sess:%s,spd:%s,atr:%s,bc:%s,ze:%s,over:%s,cool:%s,bar:%s,mode:%s",
                                           sess_ok?"T":"F", spread_ok?"T":"F", atr_ok?"T":"F", bc_ok?"T":"F",
-                                 
                    g_ze_ok?"T":"F", over_state==OK||over_state==READY?"T":"F", cool_ok?"T":"F", perbar_ok?"T":"F",
                                           ZE_GateModeToString(ZE_GateMode));
-      PrintFormat("%s trigger=%s side=%s conf=%.0f/%.0f/20 gates={%s}", EVT_ENTRY_CHECK, trigger, 
+      PrintFormat("%s trigger=%s side=%s conf=%.0f/%.0f/20 gates={%s}", EVT_ENTRY_CHECK, trigger,
                   direction > 0 ? "BUY" : "SELL", sbConf, (double)conf_eff, gates_summary);
-      if(TryOpenPosition(direction, (int)conf_eff))
+      if(TryOpenPosition(direction, (int)conf_eff, (int)sbReason))
       {
          if(trigger == "bootstrap") g_bootstrap_done = true;
          if(trigger == "pullback") g_ox.armed = false;
@@ -579,7 +590,7 @@ void CheckForNewTrades()
 //+------------------------------------------------------------------+
 //| Attempts to open a trade and returns true on success             |
 //+------------------------------------------------------------------+
-bool TryOpenPosition(int signal, int confidence)
+bool TryOpenPosition(int signal, int confidence, int reason_code)
 {
    MqlTick t;
    if(!SymbolInfoTick(_Symbol, t) || t.time_msc == 0){
@@ -599,7 +610,7 @@ bool TryOpenPosition(int signal, int confidence)
 
    double entry = (signal > 0) ? t.ask : t.bid;
    entry = NormalizeDouble(entry, digs);
-   
+
    ulong now_ms = GetTickCount64();
    string hash_str = StringFormat("%I64d|%d|%.*f", (long)g_lastBarTime, signal, digs, entry);
    ulong sig_h = StringToULongHash(hash_str);
@@ -611,10 +622,13 @@ bool TryOpenPosition(int signal, int confidence)
       }
       return false;
    }
-   
+
    double sl = 0, tp = 0;
-   if(signal > 0){ sl = NormalizeDouble(entry - sl_dist, digs); tp = NormalizeDouble(entry + RiskRewardRatio * (entry - sl), digs); }
-   else if(signal < 0){ sl = NormalizeDouble(entry + sl_dist, digs); tp = NormalizeDouble(entry - RiskRewardRatio * (sl - entry), digs); }
+   if(signal > 0){ sl = NormalizeDouble(entry - sl_dist, digs); tp = NormalizeDouble(entry + RiskRewardRatio * (entry - sl), digs);
+   }
+   else if(signal < 0){ sl = NormalizeDouble(entry + sl_dist, digs);
+   tp = NormalizeDouble(entry - RiskRewardRatio * (sl - entry), digs);
+   }
 
    PrintFormat("%s side=%s bid=%.5f ask=%.5f entry=%.5f pip=%.5f minStop=%.5f buf=%gp(%.5f) sl=%.5f tp=%.5f",
                DBG_STOPS, signal > 0 ? "BUY" : "SELL", t.bid, t.ask, entry, pip_size, min_stop_dist,
@@ -632,7 +646,15 @@ bool TryOpenPosition(int signal, int confidence)
    double lots_to_trade = CalculateLotSize(confidence, MathAbs(entry - sl));
    if(lots_to_trade < MinLotSize) return false;
    string signal_str = (signal == 1) ? "BUY" : "SELL";
-   string comment = StringFormat("AAI|C%d|Risk%.1f", confidence, MathAbs(entry - sl) / pip_size);
+
+   // Store context for journaling: AAI|Conf|Reason|ZE_Strength|SL|TP
+   string comment = StringFormat("AAI|%d|%d|%.2f|%.5f|%.5f",
+                                 confidence,
+                                 reason_code,
+                                 g_ze_strength,
+                                 sl,
+                                 tp);
+
    if(ExecutionMode == AutoExecute){
       g_last_send_sig_hash = sig_h;
       g_last_send_ms = now_ms;
@@ -651,7 +673,7 @@ bool TryOpenPosition(int signal, int confidence)
          return false;
       }
    }
-   
+
    return false;
 }
 
@@ -662,14 +684,16 @@ bool TryOpenPosition(int signal, int confidence)
 void ManageOpenPositions(const MqlDateTime &loc, bool overnight)
 {
    if(!PositionSelect(_Symbol)) return;
-   if(EnablePartialProfits) { HandlePartialProfits(); if(!PositionSelect(_Symbol)) return; }
+   if(EnablePartialProfits) { HandlePartialProfits(); if(!PositionSelect(_Symbol)) return;
+   }
    double ask = SymbolInfoDouble(symbolName, SYMBOL_ASK);
    double bid = SymbolInfoDouble(symbolName, SYMBOL_BID);
    ulong ticket = PositionGetInteger(POSITION_TICKET);
    long type = PositionGetInteger(POSITION_TYPE);
    double openP = PositionGetDouble(POSITION_PRICE_OPEN);
    double currSL = PositionGetDouble(POSITION_SL);
-   if(loc.day_of_week==FRIDAY && loc.hour>=FridayCloseHour) { trade.PositionClose(ticket); return; }
+   if(loc.day_of_week==FRIDAY && loc.hour>=FridayCloseHour) { trade.PositionClose(ticket); return;
+   }
    double beDist = PriceFromPips(BreakEvenPips);
    if(type==POSITION_TYPE_BUY && bid-openP>=beDist && (currSL < openP || currSL == 0))
       if(trade.PositionModify(ticket, openP, PositionGetDouble(POSITION_TP))) currSL=openP;
@@ -684,14 +708,19 @@ void ManageOpenPositions(const MqlDateTime &loc, bool overnight)
 void HandlePartialProfits()
 {
    string comment = PositionGetString(POSITION_COMMENT);
-   if(StringFind(comment, "|P1") != -1) return;
+   if(StringFind(comment, "|P1") != -1) return; // Already took partials
+
    string parts[];
-   if(StringSplit(comment, '|', parts) < 3) return;
-   StringReplace(parts[2], "Risk", "");
-   double initial_risk_pips = StringToDouble(parts[2]);
-   if(initial_risk_pips <= 0) return;
-   long type = PositionGetInteger(POSITION_TYPE);
+   if(StringSplit(comment, '|', parts) < 6) return; // AAI|C|R|ZE|SL|TP
+
+   double sl_price = StringToDouble(parts[4]);
    double open_price = PositionGetDouble(POSITION_PRICE_OPEN);
+   if(sl_price == 0) return;
+
+   double initial_risk_pips = MathAbs(open_price - sl_price) / PipSize();
+   if(initial_risk_pips <= 0) return;
+
+   long type = PositionGetInteger(POSITION_TYPE);
    double current_profit_pips = (type == POSITION_TYPE_BUY) ? (SymbolInfoDouble(symbolName, SYMBOL_BID) - open_price) / PipSize() : (open_price - SymbolInfoDouble(symbolName, SYMBOL_ASK)) / PipSize();
    if(current_profit_pips >= initial_risk_pips * PartialProfitRR)
    {
@@ -745,49 +774,114 @@ bool IsTradingSession()
 //+------------------------------------------------------------------+
 //| Journaling Functions                                             |
 //+------------------------------------------------------------------+
-void WriteJournalHeader()
-{
-   if(FileIsExist(JournalFileName, 0)) return;
-   int handle = FileOpen(JournalFileName, FILE_WRITE|FILE_CSV|FILE_ANSI, ",");
-   if(handle != INVALID_HANDLE) { FileWriteString(handle, "PositionID,Symbol,Type,Volume,EntryTime,EntryPrice,ExitTime,ExitPrice,Commission,Swap,Profit,Comment,ZE_Mode,ZE_Strength,ZE_OK\n"); FileClose(handle); }
-}
-void LogClosedPosition(ulong position_id)
+void JournalClosedPosition(ulong position_id)
 {
    if(!HistorySelectByPosition(position_id)) return;
-   double total_profit=0, total_comm=0, total_swap=0, total_vol=0;
-   datetime entry_t=0, exit_t=0;
-   double entry_p=0, exit_p=0;
-   string pos_sym="", pos_comm="";
-   int pos_type=-1;
+
+   // --- Data to collect ---
+   datetime timestamp_close = 0;
+   string   symbol = "";
+   string   side = "";
+   double   lots = 0;
+   double   entry_price = 0;
+   double   sl_price = 0;
+   double   tp_price = 0;
+   double   exit_price = 0;
+   double   profit = 0;
+   int      conf = 0;
+   int      reason = 0;
+   double   ze_strength = 0;
+   string   bc_mode = EnumToString(BC_AlignMode);
+
+   // --- Parse deals ---
    for(int i=0; i<HistoryDealsTotal(); i++)
    {
-      ulong deal = HistoryDealGetTicket(i);
-      total_profit += HistoryDealGetDouble(deal, DEAL_PROFIT);
-      total_comm += HistoryDealGetDouble(deal, DEAL_COMMISSION);
-      total_swap += HistoryDealGetDouble(deal, DEAL_SWAP);
-      if(HistoryDealGetInteger(deal, DEAL_ENTRY) == DEAL_ENTRY_IN)
-      {
-         if(entry_t==0)
-         {
-            entry_t = (datetime)HistoryDealGetInteger(deal, DEAL_TIME);
-            entry_p = HistoryDealGetDouble(deal, DEAL_PRICE);
-            pos_sym = HistoryDealGetString(deal, DEAL_SYMBOL); pos_comm = HistoryDealGetString(deal, DEAL_COMMENT);
-            pos_type = (int)HistoryDealGetInteger(deal, DEAL_TYPE); total_vol += HistoryDealGetDouble(deal, DEAL_VOLUME);
-         }
-      }
-      else { exit_t = (datetime)HistoryDealGetInteger(deal, DEAL_TIME); exit_p = HistoryDealGetDouble(deal, DEAL_PRICE); }
-   }
-   if(pos_sym=="") return;
-   StringReplace(pos_comm, ",", ";");
-   string csv_line = StringFormat("%d,%s,%s,%.2f,%s,%.5f,%s,%.5f,%.2f,%.2f,%.2f,%s,%s,%.2f,%s", 
-      position_id, pos_sym, (pos_type==ORDER_TYPE_BUY?"BUY":"SELL"),
-      total_vol, TimeToString(entry_t), entry_p, TimeToString(exit_t), exit_p, 
-      total_comm, total_swap, total_profit, pos_comm,
-      ZE_GateModeToString(ZE_GateMode), g_ze_strength, g_ze_ok ? "T" : "F");
+      ulong deal_ticket = HistoryDealGetTicket(i);
+      profit += HistoryDealGetDouble(deal_ticket, DEAL_PROFIT) + HistoryDealGetDouble(deal_ticket, DEAL_COMMISSION) + HistoryDealGetDouble(deal_ticket, DEAL_SWAP);
 
-   int handle = FileOpen(JournalFileName, FILE_READ|FILE_WRITE|FILE_CSV|FILE_ANSI, ",");
-   if(handle!=INVALID_HANDLE) { FileSeek(handle,0,SEEK_END); FileWriteString(handle,csv_line+"\n"); FileClose(handle); }
+      if(HistoryDealGetInteger(deal_ticket, DEAL_ENTRY) == DEAL_ENTRY_IN)
+      {
+         if(entry_price == 0) // First entry deal
+         {
+            symbol = HistoryDealGetString(deal_ticket, DEAL_SYMBOL);
+            side = (HistoryDealGetInteger(deal_ticket, DEAL_TYPE) == DEAL_TYPE_BUY) ? "BUY" : "SELL";
+            entry_price = HistoryDealGetDouble(deal_ticket, DEAL_PRICE);
+
+            string comment = HistoryDealGetString(deal_ticket, DEAL_COMMENT);
+            string parts[];
+            if(StringSplit(comment, '|', parts) >= 6)
+            {
+               conf = (int)StringToInteger(parts[1]);
+               reason = (int)StringToInteger(parts[2]);
+               ze_strength = StringToDouble(parts[3]);
+               sl_price = StringToDouble(parts[4]);
+               tp_price = StringToDouble(parts[5]);
+            }
+         }
+         lots += HistoryDealGetDouble(deal_ticket, DEAL_VOLUME);
+      }
+      else // Exit deal
+      {
+         timestamp_close = (datetime)HistoryDealGetInteger(deal_ticket, DEAL_TIME);
+         exit_price = HistoryDealGetDouble(deal_ticket, DEAL_PRICE);
+      }
+   }
+
+   if(symbol == "") return; // Should not happen if position existed
+
+   // --- Calculate derived metrics ---
+   double profit_points = 0;
+   if(lots > 0)
+   {
+       profit_points = (exit_price - entry_price) * (side == "BUY" ? 1 : -1) / point;
+   }
+
+   double rr = 0;
+   double risk_dist = MathAbs(entry_price - sl_price);
+   if(risk_dist > 0)
+   {
+      double profit_dist = MathAbs(exit_price - entry_price);
+      rr = profit_dist / risk_dist;
+   }
+
+   // --- Format and write to file ---
+   int file_handle = FileOpen(JournalFileName, FILE_READ|FILE_WRITE|FILE_CSV|(JournalUseCommonFiles ? FILE_COMMON : 0), ';');
+   if(file_handle != INVALID_HANDLE)
+   {
+      if(FileSize(file_handle) == 0)
+      {
+         FileWriteString(file_handle, "timestamp_close;symbol;side;lots;entry;sl;tp;exit;profit;profit_points;rr;conf;reason;ze_strength;bc_mode\n");
+      }
+
+      FileSeek(file_handle, 0, SEEK_END);
+
+      string line = StringFormat("%s;%s;%s;%.2f;%.5f;%.5f;%.5f;%.5f;%.2f;%.1f;%.2f;%d;%d;%.2f;%s\n",
+                                 TimeToString(timestamp_close, TIME_DATE|TIME_SECONDS),
+                                 symbol,
+                                 side,
+                                 lots,
+                                 entry_price,
+                                 sl_price,
+                                 tp_price,
+                                 exit_price,
+                                 profit,
+                                 profit_points,
+                                 rr,
+                                 conf,
+                                 reason,
+                                 ze_strength,
+                                 bc_mode);
+
+      FileWriteString(file_handle, line);
+      FileFlush(file_handle);
+      FileClose(file_handle);
+   }
+   else
+   {
+      PrintFormat("%s Failed to open journal file '%s'. Error: %d", EVT_JOURNAL, JournalFileName, GetLastError());
+   }
 }
+
 bool IsPositionLogged(ulong position_id)
 {
    for(int i=0; i<g_logged_positions_total; i++) if(g_logged_positions[i] == position_id) return true;
