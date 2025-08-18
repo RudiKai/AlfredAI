@@ -1,86 +1,85 @@
 //+------------------------------------------------------------------+
-//|                     AAI_Include_Settings.mqh                     |
-//|                  v2.0 - Central Configuration                    |
+//|                       AAI_Include_Init.mqh                       |
+//|                v2.0 - Defaults & Init Function                   |
 //|              Copyright 2025, AlfredAI Project                    |
 //+------------------------------------------------------------------+
-#ifndef __AAI_INCLUDE_SETTINGS__
-#define __AAI_INCLUDE_SETTINGS__
+#ifndef __AAI_INCLUDE_INIT__
+#define __AAI_INCLUDE_INIT__
 
-// Struct for all Alfred settings
-struct SAlfred
+#include <AAI_Include_Settings.mqh>
+
+// Call this once from your OnInit()
+void InitAlfredSettings()
 {
    // Display
-   int     fontSize;
-   int     corner;
-   int     xOffset;
-   int     yOffset;
+   Alfred.fontSize                   = 12;
+   Alfred.corner                     = CORNER_LEFT_UPPER;
+   Alfred.xOffset                    = 10;
+   Alfred.yOffset                    = 10;
 
    // Behavior
-   bool    showZoneWarning;
-   bool    enableAlerts;
-   bool    enablePane;
-   bool    enableHUD;
-   bool    enableCompass;
+   Alfred.showZoneWarning            = true;
+   Alfred.enableAlerts               = true;
+   Alfred.enablePane                 = true;
+   Alfred.enableHUD                  = true;
+   Alfred.enableCompass              = true;
 
    // AlertCenter
-   bool    enableAlertCenter;
-   bool    alertStrongBiasAligned;
-   bool    alertDivergence;
-   bool    alertZoneEntry;
-   bool    alertBiasFlip;
-   int     alertConfidenceThreshold;
+   Alfred.enableAlertCenter          = false;
+   Alfred.alertStrongBiasAligned     = true;
+   Alfred.alertDivergence            = true;
+   Alfred.alertZoneEntry             = true;
+   Alfred.alertBiasFlip              = true;
+   Alfred.alertConfidenceThreshold   = 50;
 
    // Risk & SL/TP
-   double  atrMultiplierSL;
-   double  atrMultiplierTP;
+   Alfred.atrMultiplierSL            = 1.5;
+   Alfred.atrMultiplierTP            = 2.0;
 
    // Notifications
-   bool    sendTelegram;
-   bool    sendWhatsApp;
+   Alfred.sendTelegram               = false;
+   Alfred.sendWhatsApp               = false;
 
    // Expansion
-   int     alertSensitivity;
-   int     zoneProximityThreshold;
+   Alfred.alertSensitivity           = 5;
+   Alfred.zoneProximityThreshold     = 2;
 
    // HUD Layout
-   bool    enableHUDDiagnostics;
-   int     hudCorner;
-   int     hudXOffset;
-   int     hudYOffset;
+   Alfred.enableHUDDiagnostics       = false;
+   Alfred.hudCorner                  = CORNER_LEFT_LOWER;
+   Alfred.hudXOffset                 = 10;
+   Alfred.hudYOffset                 = 10;
 
    // ZoneEngine (formerly SupDemCore)
-   int     supdemZoneLookback;
-   int     supdemZoneDurationBars;
-   double  supdemMinImpulseMovePips;
-   color   supdemDemandColorHTF;
-   color   supdemDemandColorLTF;
-   color   supdemSupplyColorHTF;
-   color   supdemSupplyColorLTF;
-   int     supdemRefreshRateSeconds;
-   bool    supdemEnableBreakoutRemoval;
-   bool    supdemRequireBodyClose;
-   bool    supdemEnableTimeDecay;
-   int     supdemTimeDecayBars;
-   bool    supdemEnableMagnetForecast;
+   Alfred.supdemZoneLookback         = 50;
+   Alfred.supdemZoneDurationBars     = 100;
+   Alfred.supdemMinImpulseMovePips   = 20.0;
+   Alfred.supdemDemandColorHTF       = clrLightGreen;
+   Alfred.supdemDemandColorLTF       = clrGreen;
+   Alfred.supdemSupplyColorHTF       = clrHotPink;
+   Alfred.supdemSupplyColorLTF       = clrRed;
+   Alfred.supdemRefreshRateSeconds   = 30;
+   Alfred.supdemEnableBreakoutRemoval= true;
+   Alfred.supdemRequireBodyClose     = true;
+   Alfred.supdemEnableTimeDecay      = true;
+   Alfred.supdemTimeDecayBars        = 20;
+   Alfred.supdemEnableMagnetForecast = true;
 
    // Compass Layout
-   int     compassYOffset;
+   Alfred.compassYOffset             = 20;
 
-   // Logging (Phase 2)
-   bool    logToFile;
-   string  logFilename;
-   bool    logIncludeATR;
-   bool    logIncludeSession;
-   bool    logEnableScreenshots;
-   string  screenshotFolder;
-   int     screenshotWidth;
-   int     screenshotHeight;
+   // Logging
+   Alfred.logToFile                  = false;
+   Alfred.logFilename                = "AlfredLog.csv";
+   Alfred.logIncludeATR              = true;
+   Alfred.logIncludeSession          = true;
+   Alfred.logEnableScreenshots       = false;
+   Alfred.screenshotFolder           = "Screenshots";
+   Alfred.screenshotWidth            = 800;
+   Alfred.screenshotHeight           = 600;
 
-   // Pane: show/hide Timeframe Bias section
-   bool    enablePaneTFBias;
-};
+   // Pane TFBias toggle
+   Alfred.enablePaneTFBias           = true;
+}
 
-// extern declaration for single global instance
-extern SAlfred Alfred;
-
-#endif // __AAI_INCLUDE_SETTINGS__
+#endif // __AAI_INCLUDE_INIT__
