@@ -212,35 +212,59 @@ inline bool ReadOne(const int handle, const int buf, const int shift, double &ou
 void AAI_UpdateZE(datetime t_now)
 {
    g_ze_strength = 0.0;
-   if(g_ze_handle == INVALID_HANDLE) return;
+   g_ze_ok       = false;
 
-   if(BarsCalculated(g_ze_handle) < ZE_ReadShift + 1)
+   if(g_ze_handle == INVALID_HANDLE)
+      return;
+
+   const int need = ZE_ReadShift + 1;
+
+   // Ensure indicator has at least (shift+1) bars calculated
+   int calc = BarsCalculated(g_ze_handle);
+   if(calc < need)
    {
-      PrintFormat("%s BarsCalculated ZE=%d", EVT_WAIT, BarsCalculated(g_ze_handle));
+      PrintFormat("%s BarsCalculated ZE=%d (<%d)", EVT_WAIT, calc, need);
       return;
    }
 
-   double ze_buf[1];
-   if(CopyBuffer(g_ze_handle, ZE_BufferIndexStrength, ZE_ReadShift, 1, ze_buf) < 1)
+   // Read ZE strength (primary buffer, with optional fallback to buf 0)
+   double buf[1];
+   ResetLastError();
+   int got = CopyBuffer(g_ze_handle, ZE_BufferIndexStrength, ZE_ReadShift, 1, buf);
+
+   if(got != 1)
    {
-      PrintFormat("%s ZE CopyBuffer failed (buf=%d shift=%d), Error: %d", EVT_WARN, ZE_BufferIndexStrength, ZE_ReadShift, GetLastError());
-      // One-time fallback attempt to buffer 0 if the input was wrong
-      if(!g_ze_fallback_logged && ZE_BufferIndexStrength != 0)
+      const int le = GetLastError();
+      PrintFormat("%s ZE CopyBuffer failed (buf=%d shift=%d le=%d)",
+                  EVT_WARN, ZE_BufferIndexStrength, ZE_ReadShift, le);
+
+      if(ZE_BufferIndexStrength != 0)
       {
-          g_ze_fallback_logged = true;
-          if(CopyBuffer(g_ze_handle, 0, ZE_ReadShift, 1, ze_buf) >= 1)
-          {
-              g_ze_strength = ze_buf[0];
-          }
+         ResetLastError();
+         got = CopyBuffer(g_ze_handle, 0, ZE_ReadShift, 1, buf);
+         if(got == 1)
+            Print("[EVT_WARN] ZE fallback to buf=0 succeeded");
       }
+   }
+
+   if(got == 1)
+   {
+      g_ze_strength = buf[0];
+      g_ze_ok       = true;
    }
    else
    {
-      g_ze_strength = ze_buf[0];
+      g_ze_strength = 0.0;   // keep gate closed if read failed
+      g_ze_ok       = false;
    }
 
+   // Telemetry
    if(ZE_TelemetryEnabled)
-      PrintFormat("[DBG_ZE] t=%s strength=%.1f", TimeToString(t_now, TIME_DATE|TIME_MINUTES), g_ze_strength);
+   {
+      ENUM_TIMEFRAMES tf = (ENUM_TIMEFRAMES)SignalTimeframe;
+      string ts = TimeToString(iTime(_Symbol, tf, ZE_ReadShift));
+      PrintFormat("[DBG_ZE] t=%s strength=%.1f", ts, g_ze_strength);
+   }
 }
 
 
