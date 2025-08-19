@@ -139,6 +139,7 @@ double    point;
 static ulong g_logged_positions[];
 int       g_logged_positions_total = 0;
 static OverextArm g_ox;
+int g_ze_buf_idx = 0;
 // --- Persistent Indicator Handles ---
 int sb_handle = INVALID_HANDLE;
 int g_ze_handle = INVALID_HANDLE;
@@ -158,6 +159,30 @@ static ulong g_last_send_ms = 0;
 static datetime g_cool_until_buy = 0, g_cool_until_sell = 0;
 bool g_ze_ok = true;
 static bool g_ze_fallback_logged = false;
+
+
+//+------------------------------------------------------------------+
+//| Auto-detect which ZE buffer contains strength (0..3)             |
+//+------------------------------------------------------------------+
+int AAI_AutoDetectZEBuffer(const int handle, const int shift)
+{
+   double tmp[1];
+   for(int b = 0; b < 4; ++b)
+   {
+      if(CopyBuffer(handle, b, shift, 1, tmp) == 1)
+      {
+         // Strength is a sane [0..10] value in our indicator
+         if(tmp[0] >= 0.0 && tmp[0] <= 10.0)
+         {
+            PrintFormat("[INIT] ZE auto-detect picked buffer %d (%.1f)", b, tmp[0]);
+            return b;
+         }
+      }
+   }
+   Print("[INIT] ZE auto-detect failed; defaulting to 0");
+   return 0;
+}
+
 
 //+------------------------------------------------------------------+
 //| Pip Math Helpers                                                 |
@@ -212,57 +237,43 @@ inline bool ReadOne(const int handle, const int buf, const int shift, double &ou
 void AAI_UpdateZE(datetime t_now)
 {
    g_ze_strength = 0.0;
-   g_ze_ok       = false;
+   if(g_ze_handle == INVALID_HANDLE) return;
 
-   if(g_ze_handle == INVALID_HANDLE)
-      return;
-
-   const int need = ZE_ReadShift + 1;
-
-   // Ensure indicator has at least (shift+1) bars calculated
    int calc = BarsCalculated(g_ze_handle);
-   if(calc < need)
+   if(calc < ZE_ReadShift + 1)
    {
-      PrintFormat("%s BarsCalculated ZE=%d (<%d)", EVT_WAIT, calc, need);
+      PrintFormat("[EVT_WAIT] BarsCalculated ZE=%d (<%d)", calc, ZE_ReadShift + 1);
       return;
    }
 
-   // Read ZE strength (primary buffer, with optional fallback to buf 0)
-   double buf[1];
+   double ze_buf[1];
    ResetLastError();
-   int got = CopyBuffer(g_ze_handle, ZE_BufferIndexStrength, ZE_ReadShift, 1, buf);
 
-   if(got != 1)
+   // First try the chosen buffer index
+   if(CopyBuffer(g_ze_handle, g_ze_buf_idx, ZE_ReadShift, 1, ze_buf) != 1)
    {
-      const int le = GetLastError();
-      PrintFormat("%s ZE CopyBuffer failed (buf=%d shift=%d le=%d)",
-                  EVT_WARN, ZE_BufferIndexStrength, ZE_ReadShift, le);
+      int le = GetLastError();
+      PrintFormat("[EVT_WARN] ZE CopyBuffer failed (buf=%d shift=%d le=%d)", g_ze_buf_idx, ZE_ReadShift, le);
 
-      if(ZE_BufferIndexStrength != 0)
+      // Fallback to 0 if we weren't already on 0
+      if(g_ze_buf_idx != 0 && CopyBuffer(g_ze_handle, 0, ZE_ReadShift, 1, ze_buf) == 1)
       {
-         ResetLastError();
-         got = CopyBuffer(g_ze_handle, 0, ZE_ReadShift, 1, buf);
-         if(got == 1)
-            Print("[EVT_WARN] ZE fallback to buf=0 succeeded");
+         Print("[EVT_WARN] ZE fallback to buf=0 succeeded");
+         g_ze_strength = ze_buf[0];
       }
-   }
-
-   if(got == 1)
-   {
-      g_ze_strength = buf[0];
-      g_ze_ok       = true;
+      else
+      {
+         g_ze_strength = 0.0;
+      }
    }
    else
    {
-      g_ze_strength = 0.0;   // keep gate closed if read failed
-      g_ze_ok       = false;
+      g_ze_strength = ze_buf[0];
    }
 
-   // Telemetry
    if(ZE_TelemetryEnabled)
    {
-      ENUM_TIMEFRAMES tf = (ENUM_TIMEFRAMES)SignalTimeframe;
-      string ts = TimeToString(iTime(_Symbol, tf, ZE_ReadShift));
+      string ts = TimeToString(iTime(_Symbol, (ENUM_TIMEFRAMES)SignalTimeframe, ZE_ReadShift));
       PrintFormat("[DBG_ZE] t=%s strength=%.1f", ts, g_ze_strength);
    }
 }
@@ -322,6 +333,15 @@ int OnInit()
    {
       PrintFormat("%s ZE handle init failed. Telemetry will show strength=0.", EVT_WARN);
    }
+   // Use tester input as a hint; -1 means auto-detect
+g_ze_buf_idx = ZE_BufferIndexStrength;
+if(g_ze_buf_idx < 0)
+   g_ze_buf_idx = AAI_AutoDetectZEBuffer(g_ze_handle, ZE_ReadShift);
+
+// Log the final gate config
+PrintFormat("[INIT] ZE gate=%d buf=%d shift=%d min=%.1f bonus=%d handle=%d",
+            ZE_GateMode, g_ze_buf_idx, ZE_ReadShift, ZE_MinStrength, ZE_PrefBonus, g_ze_handle);
+
 
    if(sb_handle == INVALID_HANDLE){ Print("[ERR] SB iCustom handle invalid"); return(INIT_FAILED); }
 
