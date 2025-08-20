@@ -7,7 +7,7 @@
 //| Copyright 2025, AlfredAI Project                    |
 //+------------------------------------------------------------------+
 #property strict
-#property version   "3.37" // As Coder, incremented version for this change
+#property version   "3.38" // As Coder, incremented version for this change
 #property description "Manages trades and logs closed positions to a CSV journal."
 #include <Trade\Trade.mqh>
 #include <Arrays\ArrayLong.mqh>
@@ -31,6 +31,7 @@
 #define DBG_ZE    "[DBG_ZE]"
 #define EVT_SUPPRESS "[EVT_SUPPRESS]"
 #define EVT_COOLDOWN "[EVT_COOLDOWN]"
+#define DBG_CONF  "[DBG_CONF]"
 
 // === BEGIN Spec: Constants for buffer indexes ===
 #define SB_BUF_SIGNAL   0
@@ -165,6 +166,55 @@ static bool g_ze_fallback_logged = false;
 /*** AAI: block counters ***/
 long g_blk_conf=0, g_blk_ze=0, g_blk_bc=0, g_blk_over=0,
      g_blk_sess=0, g_blk_spd=0, g_blk_cool=0, g_blk_bar=0, g_blk_no=0;
+
+// Placed after the global variables section
+
+/*** AAI G-015: Centralized Helpers ***/
+
+// Centralized block counting and logging
+bool AAI_Block(const string reason)
+{
+   if(g_lastBarTime == g_last_suppress_log_time) return false; // Prevent per-tick multi-counting on same bar
+   g_last_suppress_log_time = g_lastBarTime;
+
+   if(reason=="confidence")  g_blk_conf++;
+   else if(reason=="ze_gate") g_blk_ze++;
+   else if(reason=="bc")      g_blk_bc++;
+   else if(StringFind(reason, "overext")==0) g_blk_over++; // Group all overext reasons
+   else if(reason=="session")  g_blk_sess++;
+   else if(reason=="spread")   g_blk_spd++;
+   else if(reason=="cooldown") g_blk_cool++;
+   else if(reason=="same_bar") g_blk_bar++;
+   else if(reason=="no_trigger") g_blk_no++;
+   
+   PrintFormat("[EVT_SUPPRESS] reason=%s", reason);
+   return(false); 
+}
+
+// Forward-declare if this appears below the call site
+bool AAI_ComputeConfidence(double sb_conf, bool ze_ok, double &conf_raw, double &conf_eff);
+
+// Compute effective confidence (ZE bonus first), return pass/fail
+bool AAI_ComputeConfidence(double sb_conf, bool ze_ok, double &conf_raw, double &conf_eff)
+{
+   conf_raw = sb_conf;
+   conf_eff = conf_raw;
+
+   // NOTE: pick the enum token you actually have:
+   // if(ZE_GateMode==ZE_PREFERRED && ze_ok)
+   if(ZE_GateMode==ZE_GATE_PREFERRED && ze_ok)
+      conf_eff += ZE_PrefBonus;
+
+   bool gate_conf = (conf_eff >= MinConfidenceToTrade);
+
+   PrintFormat("[DBG_CONF] raw=%.1f ze_ok=%s bonus=%d eff=%.1f thr=%.1f",
+               conf_raw,
+               (ze_ok ? "T" : "F"),
+               (int)((ZE_GateMode==ZE_GATE_PREFERRED && ze_ok) ? ZE_PrefBonus : 0),
+               conf_eff, (double)MinConfidenceToTrade);
+
+   return gate_conf;
+}
 
 
 //+------------------------------------------------------------------+
@@ -344,14 +394,14 @@ int OnInit()
       PrintFormat("%s ZE handle init failed. Telemetry will show strength=0.", EVT_WARN);
    }
    // Use tester input as a hint; -1 means auto-detect
-g_ze_buf_idx = ZE_BufferIndexStrength;
-if(g_ze_buf_idx < 0)
-   g_ze_buf_idx = AAI_AutoDetectZEBuffer(g_ze_handle, ZE_ReadShift);
+   g_ze_buf_idx = ZE_BufferIndexStrength;
+   if(g_ze_buf_idx < 0)
+      g_ze_buf_idx = AAI_AutoDetectZEBuffer(g_ze_handle, ZE_ReadShift);
 
 // Log the final gate config
-PrintFormat("[INIT] ZE gate=%d buf=%d shift=%d min=%.1f bonus=%d handle=%d",
+   PrintFormat("[INIT] ZE gate=%d buf=%d shift=%d min=%.1f bonus=%d handle=%d",
             ZE_GateMode, g_ze_buf_idx, ZE_ReadShift, ZE_MinStrength, ZE_PrefBonus, g_ze_handle);
-if(sb_handle == INVALID_HANDLE){ Print("[ERR] SB iCustom handle invalid"); return(INIT_FAILED); }
+   if(sb_handle == INVALID_HANDLE){ Print("[ERR] SB iCustom handle invalid"); return(INIT_FAILED); }
 
    PrintFormat("%s EntryMode=%s", EVT_INIT, EnumToString(EntryMode));
    PrintFormat("%s ZE gate=%s buf=%d shift=%d min=%.1f bonus=%d handle=%d", EVT_INIT, ZE_GateModeToString(ZE_GateMode), ZE_BufferIndexStrength, ZE_ReadShift, ZE_MinStrength, ZE_PrefBonus, g_ze_handle);
@@ -476,6 +526,8 @@ void OnTick()
 }
 
 
+// This entire function replaces the existing CheckForNewTrades()
+
 //+------------------------------------------------------------------+
 //| Check & execute new entries                                      |
 //+------------------------------------------------------------------+
@@ -489,18 +541,11 @@ void CheckForNewTrades()
    ReadOne(sb_handle, SB_BUF_CONF, readShift, sbConf);
    ReadOne(sb_handle, SB_BUF_REASON, readShift, sbReason);
    int direction = (sbSig_curr > 0) ? 1 : (sbSig_curr < 0 ? -1 : 0);
-   string side_str = (direction > 0) ? "BUY" : "SELL";
    
    AAI_UpdateZE(g_lastBarTime);
-   if(direction == 0) {
-      if(g_lastBarTime != g_last_suppress_log_time){
-         g_blk_no++;
-         PrintFormat("%s reason=no_signal", EVT_SUPPRESS);
-         g_last_suppress_log_time = g_lastBarTime;
-      }
-      return;
-   }
+   if(direction == 0) return; // No signal from brain, nothing to check.
 
+   // --- Calculate supporting metrics ---
    double atr_val=0, fast_ma_val=0, close_price=0;
    double atr_buffer[1];
    if(CopyBuffer(g_hATR, 0, readShift, 1, atr_buffer) > 0) atr_val = atr_buffer[0];
@@ -508,15 +553,13 @@ void CheckForNewTrades()
    if(CopyBuffer(g_hOverextMA, 0, readShift, 1, ma_buffer) > 0) fast_ma_val = ma_buffer[0];
    MqlRates rates[1];
    if(CopyRates(_Symbol, _Period, readShift, 1, rates) > 0) close_price = rates[0].close;
-
    const double pip = PipSize();
    double over_p = (fast_ma_val > 0 && close_price > 0) ? MathAbs(close_price - fast_ma_val) / pip : 0.0;
-   // --- Compute Gates (in order) ---
+
+   // --- Compute Gate States ---
    bool sess_ok = IsTradingSession();
    bool spread_ok = (MaxSpreadPoints == 0 || (int)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD) <= MaxSpreadPoints);
-   bool atr_ok = (MinATRPoints == 0) ||
-   (atr_val >= MinATRPoints * point);
-
+   bool atr_ok = (MinATRPoints == 0) || (atr_val >= MinATRPoints * point);
    bool bc_ok = !SB_PassThrough_UseBC;
    if(SB_PassThrough_UseBC){
       double htf_bias=0;
@@ -525,89 +568,96 @@ void CheckForNewTrades()
          bc_ok = (BC_AlignMode == BC_PREFERRED) ? true : aligned;
       }
    }
+   
+   if(ZE_GateMode == ZE_GATE_REQUIRED || ZE_GateMode == ZE_GATE_PREFERRED)
+      g_ze_ok = (g_ze_strength >= ZE_MinStrength);
+   else
+      g_ze_ok = true;
 
-   g_ze_ok = true;
-   int conf_eff = (int)sbConf;
-
-   switch(ZE_GateMode)
+// --- confidence (ZE bonus applied inside AAI_ComputeConfidence)
+double conf_raw = 0.0, conf_eff = 0.0;
+bool pass_conf = AAI_ComputeConfidence(sbConf, g_ze_ok, conf_raw, conf_eff);
+// >>> PLACE THIS RIGHT HERE (before any overextension/session/spread gates)
+if(!pass_conf)
+{
+   g_blk_conf++;                // NOTE: see step 2 if this variable doesn't exist
+   Print("[EVT_SUPPRESS] reason=confidence");
+   return;                              // exit the entry check early
+}
+ENUM_OVEREXT_STATE over_state = OK;
+if(MaxOverextPips > 0)
+{
+   if(OverextMode == HardBlock)
+      over_state = (over_p <= MaxOverextPips) ? OK : BLOCK;
+   else
    {
-       case ZE_GATE_OFF:
-           g_ze_ok = true;
-           break;
-       case ZE_GATE_REQUIRED:
-           g_ze_ok = (g_ze_strength >= ZE_MinStrength);
-           break;
-       case ZE_GATE_PREFERRED:
-           g_ze_ok = (g_ze_strength >= ZE_MinStrength);
-           if(g_ze_ok)
-           {
-               conf_eff += ZE_PrefBonus;
-           }
-           break;
-   }
-   conf_eff = (int)MathMin(20, conf_eff);
-   // Clamp effective confidence
-   bool conf_ok = (conf_eff >= MinConfidenceToTrade);
-
-   ENUM_OVEREXT_STATE over_state = OK;
-   if(MaxOverextPips > 0){
-      if(OverextMode == HardBlock) over_state = (over_p <= MaxOverextPips) ? OK : BLOCK;
-      else { // WaitForBand
-         if(g_ox.armed){
-            if(direction != g_ox.side || g_lastBarTime > g_ox.until) { over_state = TIMEOUT;
-            g_ox.armed = false; }
-            else if(over_p <= MaxOverextPips) { over_state = READY;
-            }
-            else { g_ox.bars_waited++; over_state = ARMED;
-            }
-         } else {
-            if(over_p <= MaxOverextPips) over_state = OK;
-            else {
-               g_ox.armed=true; g_ox.side=direction; g_ox.until=g_lastBarTime+OverextPullbackBars*PeriodSeconds();
-               g_ox.bars_waited=0;
-               over_state = ARMED;
-            }
+      if(g_ox.armed)
+      {
+         if(direction != g_ox.side || g_lastBarTime > g_ox.until)
+         { 
+            over_state = TIMEOUT; 
+            g_ox.armed = false; 
+         }
+         else if(over_p <= MaxOverextPips) 
+            over_state = READY; 
+         else 
+         { 
+            g_ox.bars_waited++; 
+            over_state = ARMED; 
+         }
+      }
+      else
+      {
+         if(over_p <= MaxOverextPips) over_state = OK;
+         else
+         {
+            g_ox.armed = true; 
+            g_ox.side  = direction; 
+            g_ox.until = g_lastBarTime + OverextPullbackBars*PeriodSeconds();
+            g_ox.bars_waited = 0;
+            over_state = ARMED;
          }
       }
    }
+}
 
+   
    int secs = PeriodSeconds();
    datetime until = (direction > 0) ? g_cool_until_buy : g_cool_until_sell;
    int delta = (int)(until - g_lastBarTime);
-   int bars_left = (delta <= 0 || secs <= 0) ?
-   0 : ( (delta + secs - 1) / secs );
+   int bars_left = (delta <= 0 || secs <= 0) ? 0 : ( (delta + secs - 1) / secs );
    bool cool_ok = (bars_left == 0);
    bool perbar_ok = !PerBarDebounce || ((direction > 0) ? (g_last_entry_bar_buy != g_lastBarTime) : (g_last_entry_bar_sell != g_lastBarTime));
-   // --- DBG_GATES Log ---
-   PrintFormat("%s t=%s sig_prev=%d sig_curr=%d conf=%.0f/%.0f over_p=%.1f bc_mode=%s ox_armed=%s ox_wait=%d samebar=%s cool=%s ze_ok=%s ze_strength=%.1f",
-               DBG_GATES, TimeToString(g_lastBarTime), (int)sbSig_prev, (int)sbSig_curr, sbConf, (double)conf_eff, over_p,
-               EnumToString(BC_AlignMode), g_ox.armed ? "T" : "F", g_ox.bars_waited, !perbar_ok ? "T" : "F", !cool_ok ? "T" : "F", g_ze_ok ? "T" : "F", g_ze_strength);
-   // --- Hard Enforcement & Suppression ---
-   string suppress_reason = "";
-   if(!sess_ok) {g_blk_sess++; suppress_reason = "session";}
-   else if(!spread_ok) {g_blk_spd++; suppress_reason = "spread";}
-   else if(!atr_ok) suppress_reason = "atr";
-   else if(!bc_ok) {g_blk_bc++; suppress_reason = "bc";}
-   else if(ZE_GateMode == ZE_GATE_REQUIRED && !g_ze_ok) {g_blk_ze++; suppress_reason = StringFormat("ze_gate strength=%.1f min=%.1f", g_ze_strength, ZE_MinStrength);}
-   else if(!conf_ok) {g_blk_conf++; suppress_reason = "confidence";}
-   else if(over_state == BLOCK) {g_blk_over++; suppress_reason = StringFormat("overext_block over=%.1fp max=%dp", over_p, MaxOverextPips);}
-   else if(over_state == ARMED) {
-      if(g_lastBarTime != g_last_suppress_log_time){
-         g_blk_over++;
-         PrintFormat("%s reason=overext_armed side=%s over=%.1fp max=%dp wait_bars=%d", EVT_SUPPRESS,
-                     direction > 0 ? "BUY" : "SELL", over_p, MaxOverextPips, OverextPullbackBars);
-         g_last_suppress_log_time = g_lastBarTime;
-      }
-      return;
+
+ PrintFormat("[DBG_GATES] %s t=%s sig_prev=%d sig_curr=%d conf=%.0f/%.0f/min=%.0f over_p=%.1f bc_mode=%s ox_armed=%s ox_wait=%d samebar=%s cool=%s ze_ok=%s ze_strength=%.1f",
+            DBG_GATES, TimeToString(g_lastBarTime),
+            (int)sbSig_prev, (int)sbSig_curr,
+            conf_raw, conf_eff, (double)MinConfidenceToTrade,
+            over_p,
+            EnumToString(BC_AlignMode),
+            g_ox.armed ? "T" : "F",
+            g_ox.bars_waited,
+            !perbar_ok ? "T" : "F",
+            !cool_ok ? "T" : "F",
+            g_ze_ok ? "T" : "F",
+            g_ze_strength);
+
+   // --- Gate Enforcement using Centralized Blocker ---
+   if(!sess_ok) { AAI_Block("session"); return; }
+   if(!spread_ok) { AAI_Block("spread"); return; }
+   if(!atr_ok) { AAI_Block("atr"); return; }
+   if(!bc_ok) { AAI_Block("bc"); return; }
+   if(ZE_GateMode == ZE_GATE_REQUIRED && !g_ze_ok) { AAI_Block(StringFormat("ze_gate strength=%.1f min=%.1f", g_ze_strength, ZE_MinStrength)); return; }
+   if(!pass_conf) { AAI_Block(StringFormat("confidence eff=%.1f min=%.1f", conf_eff, (double)MinConfidenceToTrade)); return; }
+   
+   if(over_state == BLOCK) { AAI_Block(StringFormat("overext_block over=%.1fp max=%dp", over_p, MaxOverextPips)); return; }
+   if(over_state == ARMED) { 
+      PrintFormat("[EVT_SUPPRESS] reason=overext_armed side=%s over=%.1fp max=%dp wait_bars=%d",
+                  direction > 0 ? "BUY" : "SELL", over_p, MaxOverextPips, OverextPullbackBars);
+      AAI_Block("overext_armed"); // Count it, but also print details
+      return; 
    }
-   else if(over_state == TIMEOUT) suppress_reason = StringFormat("overext_timeout waited=%d", g_ox.bars_waited);
-   if(suppress_reason != ""){
-      if(g_lastBarTime != g_last_suppress_log_time){
-         PrintFormat("%s reason=%s", EVT_SUPPRESS, suppress_reason);
-         g_last_suppress_log_time = g_lastBarTime;
-      }
-      return;
-   }
+   if(over_state == TIMEOUT) { AAI_Block(StringFormat("overext_timeout waited=%d", g_ox.bars_waited)); return; }
 
    // --- Trigger Resolution ---
    string trigger = "";
@@ -616,42 +666,19 @@ void CheckForNewTrades()
    else if(OverextMode == WaitForBand && over_state == READY) trigger = "pullback";
    else if(is_edge) trigger = "edge";
 
-   if(trigger == ""){
-      if(g_lastBarTime != g_last_suppress_log_time){
-         g_blk_no++;
-         PrintFormat("%s reason=no_trigger", EVT_SUPPRESS);
-         g_last_suppress_log_time = g_lastBarTime;
-      }
-      return;
-   }
-
-   if(!cool_ok){
-      if(g_lastBarTime != g_last_suppress_log_time){
-         g_blk_cool++;
-         PrintFormat("%s reason=cooldown side=%s bars_left=%d", EVT_SUPPRESS, direction > 0 ? "BUY" : "SELL", bars_left);
-         g_last_suppress_log_time = g_lastBarTime;
-      }
-      return;
-   }
-   if(!perbar_ok){
-      if(g_lastBarTime != g_last_suppress_log_time){
-         g_blk_bar++;
-         PrintFormat("%s reason=same_bar side=%s", EVT_SUPPRESS, direction > 0 ? "BUY" : "SELL");
-         g_last_suppress_log_time = g_lastBarTime;
-      }
-      return;
-   }
+   if(trigger == "") { AAI_Block("no_trigger"); return; }
+   if(!cool_ok) { AAI_Block(StringFormat("cooldown side=%s bars_left=%d", direction > 0 ? "BUY" : "SELL", bars_left)); return; }
+   if(!perbar_ok) { AAI_Block(StringFormat("same_bar side=%s", direction > 0 ? "BUY" : "SELL")); return; }
 
    // --- Allow Path ---
    if(!PositionSelect(_Symbol))
    {
       string gates_summary = StringFormat("sess:%s,spd:%s,atr:%s,bc:%s,ze:%s,over:%s,cool:%s,bar:%s,mode:%s",
                                           sess_ok?"T":"F", spread_ok?"T":"F", atr_ok?"T":"F", bc_ok?"T":"F",
-                   g_ze_ok?"T":"F", over_state==OK||over_state==READY?"T":"F", cool_ok?"T":"F", perbar_ok?"T":"F",
-           
-                                           ZE_GateModeToString(ZE_GateMode));
+                                          g_ze_ok?"T":"F", over_state==OK||over_state==READY?"T":"F", cool_ok?"T":"F", perbar_ok?"T":"F",
+                                          ZE_GateModeToString(ZE_GateMode));
       PrintFormat("%s trigger=%s side=%s conf=%.0f/%.0f/20 gates={%s}", EVT_ENTRY_CHECK, trigger,
-                  direction > 0 ? "BUY" : "SELL", sbConf, (double)conf_eff, gates_summary);
+                  direction > 0 ? "BUY" : "SELL", conf_raw, conf_eff, gates_summary);
       if(TryOpenPosition(direction, (int)conf_eff, (int)sbReason))
       {
          if(trigger == "bootstrap") g_bootstrap_done = true;
@@ -659,7 +686,6 @@ void CheckForNewTrades()
       }
    }
 }
-
 //+------------------------------------------------------------------+
 //|
 //| Attempts to open a trade and returns true on success             |
