@@ -174,22 +174,27 @@ long g_blk_conf=0, g_blk_ze=0, g_blk_bc=0, g_blk_over=0,
 // Centralized block counting and logging
 bool AAI_Block(const string reason)
 {
-   if(g_lastBarTime == g_last_suppress_log_time) return false; // Prevent per-tick multi-counting on same bar
-   g_last_suppress_log_time = g_lastBarTime;
+   // Prevent multi-count on the same bar/tick, if you use such a guard.
+   // if(g_blocked_this_bar) return(false);
+   // g_blocked_this_bar = true;
 
-   if(reason=="confidence")  g_blk_conf++;
-   else if(reason=="ze_gate") g_blk_ze++;
-   else if(reason=="bc")      g_blk_bc++;
-   else if(StringFind(reason, "overext")==0) g_blk_over++; // Group all overext reasons
-   else if(reason=="session")  g_blk_sess++;
-   else if(reason=="spread")   g_blk_spd++;
-   else if(reason=="cooldown") g_blk_cool++;
-   else if(reason=="same_bar") g_blk_bar++;
-   else if(reason=="no_trigger") g_blk_no++;
-   
+   if(reason == "confidence")                     g_blk_conf++;
+   else if(reason == "ze_gate")                   g_blk_ze++;
+   else if(reason == "bc")                        g_blk_bc++;
+   else if(StringFind(reason, "overext", 0) == 0  // "overext_armed", "overext_timeout"
+        || StringFind(reason, "over", 0) == 0)    // future-proof: any "over..." text
+                                                  g_blk_over++;
+   else if(reason == "session")                   g_blk_sess++;
+   else if(reason == "spread")                    g_blk_spd++;
+   else if(reason == "cooldown")                  g_blk_cool++;
+   else if(reason == "same_bar")                  g_blk_bar++;
+   else if(reason == "no_trigger")                g_blk_no++;
+   else                                           g_blk_no++;   // catch-all
+
    PrintFormat("[EVT_SUPPRESS] reason=%s", reason);
-   return(false); 
+   return(false);
 }
+
 
 // Forward-declare if this appears below the call site
 bool AAI_ComputeConfidence(double sb_conf, bool ze_ok, double &conf_raw, double &conf_eff);
@@ -388,6 +393,10 @@ int OnInit()
                        SB_PassThrough_MinZoneStrength, SB_PassThrough_EnableDebug);
    if(SB_PassThrough_UseBC) bc_handle = iCustom(_Symbol, SignalTimeframe, "AAI_Indicator_BiasCompass");
 
+g_blk_conf = g_blk_ze = g_blk_bc = g_blk_over = g_blk_sess =
+g_blk_spd = g_blk_cool = g_blk_bar = g_blk_no = 0;
+
+
    g_ze_handle = iCustom(_Symbol, SignalTimeframe, "AAI_Indicator_ZoneEngine");
    if(g_ze_handle == INVALID_HANDLE)
    {
@@ -573,6 +582,10 @@ void CheckForNewTrades()
       g_ze_ok = (g_ze_strength >= ZE_MinStrength);
    else
       g_ze_ok = true;
+PrintFormat("[DBG_BC] mode=%s bc_match=%s",
+            (BC_AlignMode==BC_PREFERRED?"BC_PREFERRED":"BC_REQUIRED"),
+            (bc_ok?"T":"F"));
+
 
 // --- confidence (ZE bonus applied inside AAI_ComputeConfidence)
 double conf_raw = 0.0, conf_eff = 0.0;
