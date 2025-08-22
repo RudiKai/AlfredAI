@@ -1,24 +1,23 @@
 //+------------------------------------------------------------------+
 //|                   AAI_Indicator_ZoneEngine.mq5                   |
-//|            v2.9 - Added Zone Type Buffer for EA Comms            |
+//|            v2.8 - Contract Lock: Strength on Plot 0              |
 //|      (Detects zones and exports levels for EA consumption)       |
+//|                                                                  |
+//| Copyright 2025, AlfredAI Project                    |
 //+------------------------------------------------------------------+
 #property indicator_chart_window
 #property strict
-#property version "2.9"
+#property version "2.8" // As Coder, incremented version for this change
 
-// === BEGIN Spec: Headless + Buffers for Strength & Type ===
-#property indicator_plots   2
-#property indicator_buffers 2
+// === BEGIN Spec: Headless + single buffer for Strength ===
+#property indicator_plots   1 // Canonical Strength at plot 0
+#property indicator_buffers 1
 
 #property indicator_type1   DRAW_NONE
 #property indicator_label1  "ZE_Strength"
 double ZE_StrengthBuf[];
-
-#property indicator_type2   DRAW_NONE
-#property indicator_label2  "ZE_Type"
-double ZE_TypeBuf[];
 // === END Spec ===
+
 
 //--- Indicator Inputs ---
 input double MinImpulseMovePips = 10.0;
@@ -50,29 +49,28 @@ bool HasLiquidityGrab(ENUM_TIMEFRAMES tf, int shift, int base_candle_index, bool
 //+------------------------------------------------------------------+
 int OnInit()
 {
-    // === Bind Buffers ===
+    // === BEGIN Spec: Bind as DATA + series ===
     if(!SetIndexBuffer(0, ZE_StrengthBuf, INDICATOR_DATA))
     {
-        Print("ZE SetIndexBuffer failed for Strength");
-        return(INIT_FAILED);
-    }
-    if(!SetIndexBuffer(1, ZE_TypeBuf, INDICATOR_DATA))
-    {
-        Print("ZE SetIndexBuffer failed for Type");
+        Print("ZE SetIndexBuffer failed");
         return(INIT_FAILED);
     }
     ArraySetAsSeries(ZE_StrengthBuf, true);
-    ArraySetAsSeries(ZE_TypeBuf, true);
+    // === END Spec ===
+
     return(INIT_SUCCEEDED);
 }
 
 //+------------------------------------------------------------------+
 //| Deinitialization                                                 |
 //+------------------------------------------------------------------+
-void OnDeinit(const int reason) {}
+void OnDeinit(const int reason)
+{
+   // Nothing to do for a headless indicator with no objects
+}
 
 //+------------------------------------------------------------------+
-//| Main Calculation                                                 |
+//| Main Calculation: Fills buffers for each bar.                    |
 //+------------------------------------------------------------------+
 int OnCalculate(const int rates_total,
                 const int prev_calculated,
@@ -86,51 +84,46 @@ int OnCalculate(const int rates_total,
                 const int &spread[])
 {
     const int WARMUP = 100;
-    if(rates_total <= WARMUP) return(0);
-
-    int start_bar = rates_total - 2;
-    if(prev_calculated > 1) start_bar = rates_total - prev_calculated;
-
-    for(int i = start_bar; i >= 0; i--)
+    if(rates_total <= WARMUP)
     {
-        ZoneAnalysis demandZone = FindZone(_Period, true, i);
-        ZoneAnalysis supplyZone = FindZone(_Period, false, i);
-
-        double strength = 0.0;
-        double zoneType = 0.0; // 1 for Demand, -1 for Supply
-        double barClose = close[i];
-
-        bool isInDemand = demandZone.isValid && (barClose >= demandZone.distal && barClose <= demandZone.proximal);
-        bool isInSupply = supplyZone.isValid && (barClose >= supplyZone.proximal && barClose <= supplyZone.distal);
-
-        if(isInDemand)
-        {
-            strength = demandZone.strengthScore;
-            zoneType = 1.0;
-        }
-        else if(isInSupply)
-        {
-            strength = supplyZone.strengthScore;
-            zoneType = -1.0;
-        }
-
-        ZE_StrengthBuf[i] = strength;
-        ZE_TypeBuf[i] = zoneType;
+        return(0);
     }
 
-    // Mirror to current bar
-    if(rates_total > 1) {
-        ZE_StrengthBuf[0] = ZE_StrengthBuf[1];
-        ZE_TypeBuf[0] = ZE_TypeBuf[1];
+    // --- We only need to calculate for the last closed bar ---
+    int closed_bar_shift = 1;
+    int closed_bar_idx = rates_total - 1 - closed_bar_shift;
+
+    // --- Determine active zone and strength ---
+    ZoneAnalysis demandZone = FindZone(_Period, true, closed_bar_shift);
+    ZoneAnalysis supplyZone = FindZone(_Period, false, closed_bar_shift);
+
+    double strength = 0.0;
+    double barClose = close[closed_bar_idx];
+
+    bool isInDemand = demandZone.isValid && (barClose >= demandZone.distal && barClose <= demandZone.proximal);
+    bool isInSupply = supplyZone.isValid && (barClose >= supplyZone.proximal && barClose <= supplyZone.distal);
+
+    if(isInDemand)
+    {
+        strength = demandZone.strengthScore;
     }
-    
+    else if(isInSupply)
+    {
+        strength = supplyZone.strengthScore;
+    }
+
+    // --- Write to buffers ---
+    ZE_StrengthBuf[1] = strength; // Write to closed bar
+    ZE_StrengthBuf[0] = strength; // Mirror to current bar
+
+    // --- Telemetry for the calculated bar ---
     if(ZE_TelemetryEnabled)
     {
         static datetime last_log_time = 0;
-        if(time[rates_total - 2] != last_log_time)
+        if(time[closed_bar_idx] != last_log_time)
         {
-            PrintFormat("[ZE_EMIT] t=%s strength=%.1f type=%.1f", TimeToString(time[rates_total - 2]), ZE_StrengthBuf[1], ZE_TypeBuf[1]);
-            last_log_time = time[rates_total - 2];
+            PrintFormat("[ZE_EMIT] t=%s strength=%.1f", TimeToString(time[closed_bar_idx]), strength);
+            last_log_time = time[closed_bar_idx];
         }
     }
 
@@ -155,29 +148,24 @@ ZoneAnalysis FindZone(ENUM_TIMEFRAMES tf, bool isDemand, int shift)
 
    for(int i = 1; i < lookback; i++)
    {
-      // *** NEW, MORE ROBUST IMPULSE LOGIC ***
-      // We now define the impulse by the size of the candle body FOLLOWING the base candle.
-      MqlRates impulse_candle = rates[i-1];
-      double impulseMove = MathAbs(impulse_candle.close - impulse_candle.open);
-
-      // Check if the impulse move meets our minimum requirement in pips
+      double impulseStart = isDemand ? rates[i].low : rates[i].high;
+      double impulseEnd = isDemand ? rates[i-1].high : rates[i-1].low;
+      double impulseMove = MathAbs(impulseEnd - impulseStart);
       if(impulseMove / _Point < MinImpulseMovePips) continue;
-      // *** END OF NEW LOGIC ***
 
-      // If we found a valid impulse, define the zone based on the candle before it.
-      MqlRates base_candle = rates[i];
-      analysis.proximal = isDemand ? base_candle.high : base_candle.low;
-      analysis.distal = isDemand ? base_candle.low : base_candle.high;
-      analysis.time = base_candle.time;
+      analysis.proximal = isDemand ? rates[i].high : rates[i].low;
+      analysis.distal = isDemand ? rates[i].low : rates[i].high;
+      analysis.time = rates[i].time;
       analysis.baseCandles = 1;
       analysis.isValid = true;
-      analysis.impulseStrength = MathAbs(impulse_candle.close - base_candle.open);
-      analysis.isFresh = true; // Defaulting to true for now
+      analysis.impulseStrength = MathAbs(rates[i-1].close - rates[i].open);
+      analysis.isFresh = true;
+      // Historical freshness check is complex, default to true
       analysis.hasVolume = HasVolumeConfirmation(tf, shift, i, analysis.baseCandles);
       analysis.hasLiquidityGrab = HasLiquidityGrab(tf, shift, i, isDemand);
       analysis.strengthScore = CalculateZoneStrength(analysis, tf, shift);
 
-      return analysis; // Return the first valid zone found
+      return analysis;
    }
 
    return analysis;
@@ -249,6 +237,7 @@ bool HasLiquidityGrab(ENUM_TIMEFRAMES tf, int shift, int base_candle_index, bool
    ArraySetAsSeries(rates, true);
 
    double grab_candle_wick = isDemandZone ? rates[0].low : rates[0].high;
+
    double target_liquidity_level = isDemandZone ? rates[1].low : rates[1].high;
    for(int i = 2; i < lookback + 1; i++)
    {
@@ -257,6 +246,7 @@ bool HasLiquidityGrab(ENUM_TIMEFRAMES tf, int shift, int base_candle_index, bool
       else
          target_liquidity_level = MathMax(target_liquidity_level, rates[i].high);
    }
+
    return (isDemandZone ? (grab_candle_wick < target_liquidity_level) : (grab_candle_wick > target_liquidity_level));
 }
 //+------------------------------------------------------------------+
