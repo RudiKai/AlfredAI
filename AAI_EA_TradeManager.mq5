@@ -603,7 +603,11 @@ void CheckForNewTrades()
            bc_ok = ((direction > 0 && htf_bias > 0) || (direction < 0 && htf_bias < 0));
        }
    }
-   
+   bool useZE = (InpZE_Gate != ZE_OFF);
+bool useBC = (InpBC_AlignMode != BC_OFF);
+// when you log, it should say UseZE=F for ZE_OFF
+// EA→SB args: SafeTest=F UseZE=F UseBC=T Warmup=150
+
    ENUM_OVEREXT_STATE over_state = OK;
    if(InpMaxOverextPips > 0)
    {
