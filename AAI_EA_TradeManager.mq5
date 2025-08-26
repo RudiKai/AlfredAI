@@ -2,6 +2,7 @@
 //|                     AAI_EA_TradeManager.mq5                      |
 //|             v3.32 - Fixed Enum Conflicts & Const Modify Error    |
 //|                                                                  |
+//|
 //| (Takes trade signals from AAI_Indicator_SignalBrain)             |
 //|                                                                  |
 //| Copyright 2025, AlfredAI Project                                 |
@@ -43,12 +44,33 @@
 // === END Spec ===
 
 
+// HYBRID toggle + timeout
+input bool InpHybrid_RequireApproval = true;
+input int  InpHybrid_TimeoutSec      = 180;
+
+// Subfolders under MQL5/Files (no trailing backslash)
+string   g_dir_base   = "AlfredAI";
+string   g_dir_intent = "AlfredAI\\intents";
+string   g_dir_cmds   = "AlfredAI\\cmds";
+
+// Pending intent state
+string   g_pending_id = "";
+datetime g_pending_ts = 0;
+
+// Store last computed order params for approval placement
+string   g_last_side  = "";
+double   g_last_entry = 0.0, g_last_sl = 0.0, g_last_tp = 0.0, g_last_vol = 0.0;
+double   g_last_rr    = 0.0, g_last_conf_raw = 0.0, g_last_conf_eff = 0.0, g_last_ze = 0.0;
+string   g_last_comment = "";
+
+
 //--- Helper Enums
 enum ENUM_REASON_CODE
 {
     REASON_NONE,
     REASON_BUY_HTF_CONTINUATION,
-    REASON_SELL_HTF_CONTINUATION,
+  
+   REASON_SELL_HTF_CONTINUATION,
     REASON_BUY_LIQ_GRAB_ALIGNED,
     REASON_SELL_LIQ_GRAB_ALIGNED,
     REASON_NO_ZONE,
@@ -89,10 +111,12 @@ input bool SB_PassThrough_EnableDebug = true;
 
 //--- Risk Management Inputs ---
 input group "Risk Management (M15 Baseline)"
-input double   InpRiskPct           = 0.25;      // Risk Percentage
+input double   InpRiskPct           = 0.25;
+// Risk Percentage
 input double   MinLotSize           = 0.01;
 input double   MaxLotSize           = 10.0;
-input int      InpSL_Buffer_Points  = 10;        // SL Buffer in Points
+input int      InpSL_Buffer_Points  = 10;
+// SL Buffer in Points
 
 //--- Trade Management Inputs ---
 input group "Trade Management (M15 Baseline)"
@@ -107,37 +131,53 @@ input int      StartMinute          = 0;
 input int      EndHour              = 23;
 input int      EndMinute            = 30;
 input bool     EnableLogging        = true;
-
 //--- Exit Strategy Inputs (M15 Baseline) ---
 input group "Exit Strategy"
-input bool     InpExit_FixedRR        = true;      // Use Fixed RR (a) or Partials (b)
-input double   InpFixed_RR            = 1.6;       // (a) Fixed Risk-Reward Ratio
-input double   InpPartial_Pct         = 50.0;      // (b) Percent to close at partial target
-input double   InpPartial_R_multiple  = 1.0;       // (b) R-multiple for partial profit
-input int      InpBE_Offset_Points    = 1;         // (b) Points to add for Break-Even
-input int      InpTrail_Start_Pips    = 22;        // (b) Pips in profit to start trailing
-input int      InpTrail_Stop_Pips     = 10;        // (b) Trailing stop distance in pips
+input bool     InpExit_FixedRR        = true;
+// Use Fixed RR (a) or Partials (b)
+input double   InpFixed_RR            = 1.6;
+// (a) Fixed Risk-Reward Ratio
+input double   InpPartial_Pct         = 50.0;
+// (b) Percent to close at partial target
+input double   InpPartial_R_multiple  = 1.0;
+// (b) R-multiple for partial profit
+input int      InpBE_Offset_Points    = 1;
+// (b) Points to add for Break-Even
+input int      InpTrail_Start_Pips    = 22;
+// (b) Pips in profit to start trailing
+input int      InpTrail_Stop_Pips     = 10;
+// (b) Trailing stop distance in pips
 
 //--- Entry Filter Inputs (M15 Baseline) ---
 input group "Entry Filters"
-input int        InpMinConfidence        = 11;       // Minimum confidence score to trade
-input bool       InpOver_SoftWait        = true;     // Use SoftWait for overextension
-input int        InpMaxOverextPips       = 18;       // Max pips from MA for overextension
-input int        InpPullbackBarsMin      = 7;        // Min bars to wait for pullback
-input int        InpPullbackBarsMax      = 9;        // Max bars to wait for pullback
-input int        InpATR_MinPips          = 18;       // Minimum ATR value in pips
+input int        InpMinConfidence        = 11;
+// Minimum confidence score to trade
+input bool       InpOver_SoftWait        = true;
+// Use SoftWait for overextension
+input int        InpMaxOverextPips       = 18;
+// Max pips from MA for overextension
+input int        InpPullbackBarsMin      = 7;
+// Min bars to wait for pullback
+input int        InpPullbackBarsMax      = 9;
+// Max bars to wait for pullback
+input int        InpATR_MinPips          = 18;
+// Minimum ATR value in pips
 input int        OverextMAPeriod         = 10;
-
 //--- Confluence Module Inputs (M15 Baseline) ---
 input group "Confluence Modules"
-input ENUM_BC_ALIGN_MODE InpBC_AlignMode   = BC_PREFERRED;  // Bias Compass alignment mode
-input ENUM_ZE_GATE_MODE  InpZE_Gate        = ZE_PREFERRED;  // ZoneEngine gating mode
-input int        InpZE_MinStrength       = 6;         // ZE minimum strength
-input int        InpZE_PrefBonus         = 2;         // ZE confidence bonus for PREFERRED
-input int        InpZE_BufferIndexStrength = -1;      // ZE Strength Buffer (-1 for auto)
-input int        InpZE_ReadShift         = 1;         // ZE lookback shift
+input ENUM_BC_ALIGN_MODE InpBC_AlignMode   = BC_PREFERRED;
+// Bias Compass alignment mode
+input ENUM_ZE_GATE_MODE  InpZE_Gate        = ZE_PREFERRED;
+// ZoneEngine gating mode
+input int        InpZE_MinStrength       = 6;
+// ZE minimum strength
+input int        InpZE_PrefBonus         = 2;
+// ZE confidence bonus for PREFERRED
+input int        InpZE_BufferIndexStrength = -1;
+// ZE Strength Buffer (-1 for auto)
+input int        InpZE_ReadShift         = 1;
+// ZE lookback shift
 input bool       ZE_TelemetryEnabled     = true;
-
 //--- Journaling Inputs ---
 input group "Journaling"
 input bool     EnableJournaling     = true;
@@ -174,16 +214,50 @@ static bool g_ze_fallback_logged = false;
 
 // --- Block counters ---
 int g_blk_conf = 0; // confidence gate
-int g_blk_ze = 0;   // ZoneEngine gate (REQUIRED only)
+int g_blk_ze = 0;
+// ZoneEngine gate (REQUIRED only)
 int g_blk_bc = 0;   // BiasCompass misalignment
-int g_blk_over = 0; // any over-extension abort
+int g_blk_over = 0;
+// any over-extension abort
 int g_blk_sess = 0; // session filter block
-int g_blk_spd = 0;  // spread filter block
+int g_blk_spd = 0;
+// spread filter block
 int g_blk_cool = 0; // cooldown / recent trade block
-int g_blk_bar = 0;  // same-bar re-entry guard
+int g_blk_bar = 0;
+// same-bar re-entry guard
 int g_blk_no = 0;   // no_trigger / other fallthrough
 bool g_test_summary_printed = false; // ensure exactly-one [TEST_SUMMARY]
 
+
+//+------------------------------------------------------------------+
+//| HYBRID Approval Helper Functions                                 |
+//+------------------------------------------------------------------+
+bool WriteText(const string path, const string text)
+{
+   int h = FileOpen(path, FILE_WRITE|FILE_TXT|FILE_ANSI);
+   if(h==INVALID_HANDLE){ PrintFormat("[HYBRID] FileOpen write fail %s (%d)", path, GetLastError()); return false; }
+   FileWriteString(h, text);
+   FileClose(h);
+   return true;
+}
+
+string ReadAll(const string path)
+{
+   int h = FileOpen(path, FILE_READ|FILE_TXT|FILE_ANSI);
+   if(h==INVALID_HANDLE) return "";
+   string s = FileReadString(h, (int)FileSize(h));
+   FileClose(h);
+   return s;
+}
+
+string JsonGetStr(const string json, const string key)
+{
+   string pat="\""+key+"\":\"";
+   int p=StringFind(json, pat); if(p<0) return "";
+   p+=StringLen(pat);
+   int q=StringFind(json,"\"",p); if(q<0) return "";
+   return StringSubstr(json, p, q-p);
+}
 
 //+------------------------------------------------------------------+
 //| Centralized block counting and logging                           |
@@ -194,7 +268,6 @@ void AAI_Block(const string reason)
     string r = reason;
     // Now, convert the copy to lowercase in place
     StringToLower(r);
-
     // Check the reason using the lowercase copy
     if(StringFind(r, "overext") == 0 || StringFind(r, "over") == 0) { g_blk_over++; }
     else if(r == "confidence")         { g_blk_conf++; }
@@ -262,7 +335,7 @@ inline double PipSize()
 {
    const int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
    return (digits == 3 || digits == 5) ?
-          10 * _Point : _Point;
+   10 * _Point : _Point;
 }
 
 inline double PriceFromPips(double pips)
@@ -386,8 +459,8 @@ double CalculateLotSize(int confidence, double sl_distance_price)
 //+------------------------------------------------------------------+
 void AAI_ResetBlockCounters()
 {
-    g_blk_conf = g_blk_ze = g_blk_bc = g_blk_over = g_blk_sess = 0;
-    g_blk_spd = g_blk_cool = g_blk_bar = g_blk_no = 0;
+    g_blk_conf = 0; g_blk_ze = 0; g_blk_bc = 0; g_blk_over = 0; g_blk_sess = 0;
+    g_blk_spd = 0; g_blk_cool = 0; g_blk_bar = 0; g_blk_no = 0;
 }
 
 void AAI_PrintTestSummaryOnce()
@@ -413,11 +486,16 @@ int OnInit()
    g_ox.armed = false;
    g_last_entry_bar_buy=0; g_last_entry_bar_sell=0;
    g_cool_until_buy=0; g_cool_until_sell=0;
+   
+   bool useZE = (InpZE_Gate != ZE_OFF);
+   bool useBC = (InpBC_AlignMode != BC_OFF);
+   
    sb_handle = iCustom(_Symbol, SignalTimeframe, "AAI_Indicator_SignalBrain",
-                       SB_PassThrough_SafeTest, SB_PassThrough_UseZE, SB_PassThrough_UseBC,
+                       SB_PassThrough_SafeTest, useZE, useBC,
                        SB_PassThrough_WarmupBars, SB_PassThrough_FastMA, SB_PassThrough_SlowMA,
                        SB_PassThrough_MinZoneStrength, SB_PassThrough_EnableDebug);
-   if(SB_PassThrough_UseBC) bc_handle = iCustom(_Symbol, SignalTimeframe, "AAI_Indicator_BiasCompass");
+                       
+   if(useBC) bc_handle = iCustom(_Symbol, SignalTimeframe, "AAI_Indicator_BiasCompass");
 
    g_ze_handle = iCustom(_Symbol, SignalTimeframe, "AAI_Indicator_ZoneEngine");
    if(g_ze_handle == INVALID_HANDLE)
@@ -436,27 +514,38 @@ int OnInit()
    PrintFormat("%s EntryMode=%s", EVT_INIT, EnumToString(EntryMode));
    PrintFormat("%s ZE gate=%s buf=%d shift=%d min=%.1f bonus=%d handle=%d", EVT_INIT, ZE_GateModeToString(InpZE_Gate), InpZE_BufferIndexStrength, InpZE_ReadShift, (double)InpZE_MinStrength, InpZE_PrefBonus, g_ze_handle);
    PrintFormat("%s EA→SB args: SafeTest=%c UseZE=%c UseBC=%c Warmup=%d | sb_handle=%d",
-               EVT_INIT, SB_PassThrough_SafeTest ? 'T' : 'F', SB_PassThrough_UseZE ? 'T' : 'F',
-               SB_PassThrough_UseBC ? 'T' : 'F', SB_PassThrough_WarmupBars, sb_handle);
+               EVT_INIT, SB_PassThrough_SafeTest ? 'T' : 'F', useZE ? 'T' : 'F',
+               useBC ? 'T' : 'F', SB_PassThrough_WarmupBars, sb_handle);
    g_hATR = iATR(_Symbol, _Period, 14);
-   if(g_hATR == INVALID_HANDLE){ Print("[ERR] Failed to create ATR indicator handle"); return(INIT_FAILED); }
+   if(g_hATR == INVALID_HANDLE){ Print("[ERR] Failed to create ATR indicator handle"); return(INIT_FAILED);
+   }
 
    g_hOverextMA = iMA(_Symbol, _Period, OverextMAPeriod, 0, MODE_SMA, PRICE_CLOSE);
    if(g_hOverextMA == INVALID_HANDLE){ Print("[ERR] Failed to create Overextension MA handle"); return(INIT_FAILED); }
+   
+   if(InpHybrid_RequireApproval)
+   {
+      FolderCreate(g_dir_base);
+      FolderCreate(g_dir_intent);
+      FolderCreate(g_dir_cmds);
+      Print("[HYBRID] Approval mode active. Timer set to 2 seconds.");
+      EventSetTimer(2);
+   }
 
-   EventSetTimer(1);
    return(INIT_SUCCEEDED);
 }
 
 
-void OnTesterDeinit() { AAI_PrintTestSummaryOnce(); }
+void OnTesterDeinit() { AAI_PrintTestSummaryOnce();
+}
 
 //+------------------------------------------------------------------+
 //| Expert deinitialization                                          |
 //+------------------------------------------------------------------+
 void OnDeinit(const int reason)
 {
-   EventKillTimer();
+   if(InpHybrid_RequireApproval)
+      EventKillTimer();
    PrintFormat("%s Deinitialized. Reason=%d", EVT_INIT, reason);
    AAI_PrintTestSummaryOnce();
    if(sb_handle != INVALID_HANDLE) IndicatorRelease(sb_handle);
@@ -466,13 +555,126 @@ void OnDeinit(const int reason)
    if(g_hOverextMA != INVALID_HANDLE) IndicatorRelease(g_hOverextMA);
 }
 
+
 //+------------------------------------------------------------------+
-//| Timer function for heartbeat                                     |
+//| HYBRID: Emit trade intent to file                                |
+//+------------------------------------------------------------------+
+bool EmitIntent(const string side, double entry, double sl, double tp, double volume,
+                double rr_target, double conf_raw, double conf_eff, double ze_strength)
+{
+   g_pending_id = StringFormat("%s_%s_%I64d", _Symbol, EnumToString(_Period), (long)TimeCurrent());
+   g_pending_ts = TimeCurrent();
+   string fn = g_dir_intent + "\\intent_" + g_pending_id + ".json";
+   string json = StringFormat(
+      "{\"id\":\"%s\",\"symbol\":\"%s\",\"timeframe\":\"%s\",\"side\":\"%s\","
+      "\"entry\":%.5f,\"sl\":%.5f,\"tp\":%.5f,\"volume\":%.2f,"
+      "\"rr_target\":%.2f,\"conf_raw\":%.2f,\"conf_eff\":%.2f,\"ze_strength\":%.2f,"
+      "\"created_ts\":\"%s\"}",
+      g_pending_id, _Symbol, EnumToString(_Period), side,
+      entry, sl, tp, volume,
+      rr_target, conf_raw, conf_eff, ze_strength,
+      TimeToString(TimeCurrent(), TIME_DATE|TIME_MINUTES)
+   );
+   if(WriteText(fn, json)){ PrintFormat("[HYBRID] intent written: %s", fn); return true; }
+   return false;
+   
+   string filesRoot = TerminalInfoString(TERMINAL_DATA_PATH) + "\\MQL5\\Files\\";
+PrintFormat("[HYBRID] intent written at: %s%s", filesRoot, fn);  // fn is your relative intents path
+
+}
+
+//+------------------------------------------------------------------+
+//| HYBRID: Execute order after approval                             |
+//+------------------------------------------------------------------+
+void PlaceOrderFromApproval()
+{
+    // This function assumes all g_last_* globals have been set by TryOpenPosition
+    PrintFormat("[HYBRID] Executing approved trade. Side: %s, Vol: %.2f, Entry: Market, SL: %.5f, TP: %.5f",
+                g_last_side, g_last_vol, g_last_sl, g_last_tp);
+
+    trade.SetDeviationInPoints(MaxSlippagePoints);
+    bool order_sent = false;
+    
+    // Using 0 for price executes a market order
+    if(g_last_side == "BUY")
+    {
+        order_sent = trade.Buy(g_last_vol, symbolName, 0, g_last_sl, g_last_tp, g_last_comment);
+    }
+    else if(g_last_side == "SELL")
+    {
+        order_sent = trade.Sell(g_last_vol, symbolName, 0, g_last_sl, g_last_tp, g_last_comment);
+    }
+
+    if(order_sent && (trade.ResultRetcode() == TRADE_RETCODE_DONE || trade.ResultRetcode() == TRADE_RETCODE_DONE_PARTIAL))
+    {
+       PrintFormat("%s HYBRID Signal:%s → Executed %.2f lots @%.5f | SL:%.5f TP:%.5f", EVT_ENTRY, g_last_side, trade.ResultVolume(), trade.ResultPrice(), g_last_sl, g_last_tp);
+       if(g_last_side == "BUY") g_last_entry_bar_buy = g_lastBarTime; else g_last_entry_bar_sell = g_lastBarTime;
+    }
+    else
+    {
+       if(g_lastBarTime != g_last_suppress_log_time)
+       {
+          PrintFormat("%s reason=trade_send_failed details=retcode:%d", EVT_SUPPRESS, trade.ResultRetcode());
+          g_last_suppress_log_time = g_lastBarTime;
+       }
+    }
+}
+
+
+//+------------------------------------------------------------------+
+//| Timer function for HYBRID polling                                |
 //+------------------------------------------------------------------+
 void OnTimer()
 {
-    if((g_tickCount % 100) == 0) Print(EVT_HEARTBEAT);
+   if(!InpHybrid_RequireApproval || g_pending_id=="") return;
+
+   // timeout guard
+   if((TimeCurrent() - g_pending_ts) > InpHybrid_TimeoutSec){
+      Print("[HYBRID] intent timeout, discarding: ", g_pending_id);
+      g_pending_id = "";
+      return;
+   }
+
+   // full path base for clarity (prints once per pending ID)
+   static string filesRoot="";
+   if(filesRoot=="")
+      filesRoot = TerminalInfoString(TERMINAL_DATA_PATH) + "\\MQL5\\Files\\";
+
+   // look for the EXACT matching command file
+   string cmd_rel  = g_dir_cmds + "\\cmd_" + g_pending_id + ".json";
+   string cmd_full = filesRoot + cmd_rel;
+
+   // optional breadcrumb (helps confirm folder in the log)
+   // PrintFormat("[HYBRID] checking cmd: %s", cmd_full);
+
+   if(!FileIsExist(cmd_rel))  // NOTE: File* APIs use relative path from MQL5/Files
+      return;
+
+   string s = ReadAll(cmd_rel);
+   if(s==""){ FileDelete(cmd_rel); return; }
+
+   string id     = JsonGetStr(s, "id");
+   string action = JsonGetStr(s, "action");
+   StringToLower(action);
+
+   if(id != g_pending_id){
+      // stale/wrong id; ignore or delete
+      // FileDelete(cmd_rel);
+      return;
+   }
+
+   if(action=="approve"){
+      Print("[HYBRID] APPROVED: ", id);
+      // TODO: call your placement using g_last_* values
+      // PlaceOrderFromApproval();
+   } else {
+      Print("[HYBRID] REJECTED: ", id);
+   }
+
+   FileDelete(cmd_rel);
+   g_pending_id = "";
 }
+
 
 //+------------------------------------------------------------------+
 //| Trade Transaction Event Handler                                  |
@@ -562,7 +764,6 @@ void CheckForNewTrades()
    
    AAI_UpdateZE(g_lastBarTime);
    if(direction == 0) return; // No signal from brain, nothing to check.
-
    // --- Calculate supporting metrics ---
    double atr_val=0, fast_ma_val=0, close_price=0;
    double atr_buffer[1];
@@ -573,7 +774,6 @@ void CheckForNewTrades()
    if(CopyRates(_Symbol, _Period, readShift, 1, rates) > 0) close_price = rates[0].close;
    const double pip = PipSize();
    double over_p = (fast_ma_val > 0 && close_price > 0) ? MathAbs(close_price - fast_ma_val) / pip : 0.0;
-   
    // --- ZoneEngine Gating (Step 1) ---
    if(InpZE_Gate == ZE_REQUIRED || InpZE_Gate == ZE_PREFERRED)
       g_ze_ok = (g_ze_strength >= InpZE_MinStrength);
@@ -594,7 +794,8 @@ void CheckForNewTrades()
    // --- Compute Other Gate States ---
    bool sess_ok = IsTradingSession();
    bool spread_ok = (MaxSpreadPoints == 0 || (int)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD) <= MaxSpreadPoints);
-   bool atr_ok = (InpATR_MinPips == 0) || ((atr_val / pip) >= InpATR_MinPips);
+   bool atr_ok = (InpATR_MinPips == 0) ||
+   ((atr_val / pip) >= InpATR_MinPips);
 
    bool bc_ok = true; // Default to true
    if (InpBC_AlignMode == BC_REQUIRED && SB_PassThrough_UseBC) {
@@ -612,7 +813,8 @@ bool useBC = (InpBC_AlignMode != BC_OFF);
    if(InpMaxOverextPips > 0)
    {
       if(!InpOver_SoftWait) // HardBlock Mode
-         over_state = (over_p <= InpMaxOverextPips) ? OK : BLOCK;
+         over_state = (over_p <= InpMaxOverextPips) ?
+OK : BLOCK;
       else // SoftWait Mode
       {
          if(g_ox.armed)
@@ -649,10 +851,10 @@ bool useBC = (InpBC_AlignMode != BC_OFF);
    int secs = PeriodSeconds();
    datetime until = (direction > 0) ? g_cool_until_buy : g_cool_until_sell;
    int delta = (int)(until - g_lastBarTime);
-   int bars_left = (delta <= 0 || secs <= 0) ? 0 : ( (delta + secs - 1) / secs );
+   int bars_left = (delta <= 0 || secs <= 0) ?
+0 : ( (delta + secs - 1) / secs );
    bool cool_ok = (bars_left == 0);
    bool perbar_ok = !PerBarDebounce || ((direction > 0) ? (g_last_entry_bar_buy != g_lastBarTime) : (g_last_entry_bar_sell != g_lastBarTime));
-
    PrintFormat("[DBG_GATES] %s t=%s sig_prev=%d sig_curr=%d conf=%.0f/%.0f/min=%d over_p=%.1f bc_mode=%s ox_armed=%s ox_wait=%d samebar=%s cool=%s ze_ok=%s ze_strength=%.1f",
             DBG_GATES, TimeToString(g_lastBarTime),
             (int)sbSig_prev, (int)sbSig_curr,
@@ -660,22 +862,27 @@ bool useBC = (InpBC_AlignMode != BC_OFF);
             over_p,
             EnumToString(InpBC_AlignMode),
             g_ox.armed ? "T" : "F",
+       
             g_ox.bars_waited,
             !perbar_ok ? "T" : "F",
             !cool_ok ? "T" : "F",
             g_ze_ok ? "T" : "F",
             g_ze_strength);
-
    // --- Gate Enforcement using Centralized Blocker ---
    if(!sess_ok) { AAI_Block("session"); return; }
-   if(!spread_ok) { AAI_Block("spread"); return; }
+   if(!spread_ok) { AAI_Block("spread");
+   return; }
    if(!atr_ok) { AAI_Block("atr"); return; }
-   if(!bc_ok) { AAI_Block("bc"); return; }
-   if(InpZE_Gate == ZE_REQUIRED && !g_ze_ok) { AAI_Block("ze_gate"); return; }
+   if(!bc_ok) { AAI_Block("bc"); return;
+   }
+   if(InpZE_Gate == ZE_REQUIRED && !g_ze_ok) { AAI_Block("ze_gate"); return;
+   }
    
    if(over_state == BLOCK) { AAI_Block("overext_block"); return; }
-   if(over_state == ARMED) { AAI_Block("overext_armed"); return; }
-   if(over_state == TIMEOUT) { AAI_Block("overext_timeout"); return; }
+   if(over_state == ARMED) { AAI_Block("overext_armed");
+   return; }
+   if(over_state == TIMEOUT) { AAI_Block("overext_timeout"); return;
+   }
 
    // --- Trigger Resolution ---
    string trigger = "";
@@ -685,7 +892,8 @@ bool useBC = (InpBC_AlignMode != BC_OFF);
    else if(is_edge) trigger = "edge";
 
    if(trigger == "") { AAI_Block("no_trigger"); return; }
-   if(!cool_ok) { AAI_Block("cooldown"); return; }
+   if(!cool_ok) { AAI_Block("cooldown"); return;
+   }
    if(!perbar_ok) { AAI_Block("same_bar"); return; }
 
    // --- Allow Path ---
@@ -693,11 +901,12 @@ bool useBC = (InpBC_AlignMode != BC_OFF);
    {
       string gates_summary = StringFormat("sess:%s,spd:%s,atr:%s,bc:%s,ze:%s,over:%s,cool:%s,bar:%s,mode:%s",
                                           sess_ok?"T":"F", spread_ok?"T":"F", atr_ok?"T":"F", bc_ok?"T":"F",
-                                          g_ze_ok?"T":"F", over_state==OK||over_state==READY?"T":"F", cool_ok?"T":"F", perbar_ok?"T":"F",
+                          
+                                 g_ze_ok?"T":"F", over_state==OK||over_state==READY?"T":"F", cool_ok?"T":"F", perbar_ok?"T":"F",
                                           ZE_GateModeToString(InpZE_Gate));
       PrintFormat("%s trigger=%s side=%s conf=%.0f/%.0f/20 gates={%s}", EVT_ENTRY_CHECK, trigger,
                   direction > 0 ? "BUY" : "SELL", conf_raw, conf_eff, gates_summary);
-      if(TryOpenPosition(direction, (int)conf_eff, (int)sbReason))
+      if(TryOpenPosition(direction, conf_raw, conf_eff, (int)sbReason, g_ze_strength))
       {
          if(trigger == "bootstrap") g_bootstrap_done = true;
          if(trigger == "pullback") g_ox.armed = false;
@@ -707,7 +916,7 @@ bool useBC = (InpBC_AlignMode != BC_OFF);
 //+------------------------------------------------------------------+
 //| Attempts to open a trade and returns true on success             |
 //+------------------------------------------------------------------+
-bool TryOpenPosition(int signal, int confidence, int reason_code)
+bool TryOpenPosition(int signal, double conf_raw, double conf_eff, int reason_code, double ze_strength)
 {
    MqlTick t;
    if(!SymbolInfoTick(_Symbol, t) || t.time_msc == 0){
@@ -724,7 +933,6 @@ bool TryOpenPosition(int signal, int confidence, int reason_code)
    const double min_stop_dist = (double)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * point;
    const double buf_price = InpSL_Buffer_Points * point;
    const double sl_dist = MathMax(min_stop_dist + step, buf_price);
-
    double entry = (signal > 0) ? t.ask : t.bid;
    entry = NormalizeDouble(entry, digs);
 
@@ -744,24 +952,23 @@ bool TryOpenPosition(int signal, int confidence, int reason_code)
    if(signal > 0){ 
       sl = NormalizeDouble(entry - sl_dist, digs);
       if(InpExit_FixedRR) tp = NormalizeDouble(entry + InpFixed_RR * (entry - sl), digs);
-      else tp = 0; // TP managed by partials/trail
+      else tp = 0;
+      // TP managed by partials/trail
    }
    else if(signal < 0){ 
       sl = NormalizeDouble(entry + sl_dist, digs);
       if(InpExit_FixedRR) tp = NormalizeDouble(entry - InpFixed_RR * (sl - entry), digs);
-      else tp = 0; // TP managed by partials/trail
+      else tp = 0;
+      // TP managed by partials/trail
    }
 
    PrintFormat("%s side=%s bid=%.5f ask=%.5f entry=%.5f pip=%.5f minStop=%.5f buf=%dp(%.5f) sl=%.5f tp=%.5f",
                DBG_STOPS, signal > 0 ? "BUY" : "SELL", t.bid, t.ask, entry, pip_size, min_stop_dist,
                InpSL_Buffer_Points, buf_price, sl, tp);
-               
    bool ok_side = (signal > 0) ? (sl < entry) : (entry < sl);
    if (tp != 0) ok_side &= (signal > 0) ? (entry < tp) : (tp < entry);
-   
    bool ok_dist = (MathAbs(entry - sl) >= min_stop_dist);
    if(tp != 0) ok_dist &= (MathAbs(tp - entry) >= min_stop_dist);
-
    if(!ok_side || !ok_dist){
       if(g_lastBarTime != g_last_suppress_log_time){
          PrintFormat("%s reason=stops_invalid details=side:%s entry:%.5f sl:%.5f tp:%.5f", EVT_SUPPRESS, signal > 0 ? "BUY" : "SELL", entry, sl, tp);
@@ -770,18 +977,40 @@ bool TryOpenPosition(int signal, int confidence, int reason_code)
       return false;
    }
 
-   double lots_to_trade = CalculateLotSize(confidence, MathAbs(entry - sl));
+   double lots_to_trade = CalculateLotSize((int)conf_eff, MathAbs(entry - sl));
    if(lots_to_trade < MinLotSize) return false;
-   
    string signal_str = (signal == 1) ? "BUY" : "SELL";
    string comment = StringFormat("AAI|%d|%d|%.2f|%.5f|%.5f",
-                                 confidence, reason_code, g_ze_strength, sl, tp);
+                                 (int)conf_eff, reason_code, ze_strength, sl, tp);
 
    if(ExecutionMode == AutoExecute){
+      // --- HYBRID APPROVAL INTERCEPTION ---
+      g_last_side      = signal_str;
+      g_last_entry     = entry; 
+      g_last_sl        = sl; 
+      g_last_tp        = tp; 
+      g_last_vol       = lots_to_trade;
+      g_last_rr        = InpExit_FixedRR ? InpFixed_RR : InpPartial_R_multiple;
+      g_last_conf_raw  = conf_raw;
+      g_last_conf_eff  = conf_eff;
+      g_last_ze        = ze_strength;
+      g_last_comment   = comment;
+
+      if(InpHybrid_RequireApproval)
+      {
+         if(EmitIntent(g_last_side, g_last_entry, g_last_sl, g_last_tp, g_last_vol,
+                       g_last_rr, g_last_conf_raw, g_last_conf_eff, g_last_ze))
+            return false; // Return false because trade is NOT placed yet. It waits for approval.
+         else
+            return false; // Failed to emit intent, so don't proceed.
+      }
+      
+      // --- ORIGINAL PLACEMENT LOGIC (if not in HYBRID mode) ---
       g_last_send_sig_hash = sig_h;
       g_last_send_ms = now_ms;
       trade.SetDeviationInPoints(MaxSlippagePoints);
       bool order_sent = (signal > 0) ? trade.Buy(lots_to_trade, symbolName, entry, sl, tp, comment) : trade.Sell(lots_to_trade, symbolName, entry, sl, tp, comment);
+      
       if(order_sent && (trade.ResultRetcode() == TRADE_RETCODE_DONE || trade.ResultRetcode() == TRADE_RETCODE_DONE_PARTIAL)){
          PrintFormat("%s Signal:%s → Executed %.2f lots @%.5f | SL:%.5f TP:%.5f", EVT_ENTRY, signal_str, trade.ResultVolume(), trade.ResultPrice(), sl, tp);
          if(signal > 0) g_last_entry_bar_buy = g_lastBarTime; else g_last_entry_bar_sell = g_lastBarTime;
@@ -805,15 +1034,15 @@ bool TryOpenPosition(int signal, int confidence, int reason_code)
 void ManageOpenPositions(const MqlDateTime &loc, bool overnight)
 {
    if(!PositionSelect(_Symbol)) return;
-   
    // If not using Fixed RR, manage partials
    if(!InpExit_FixedRR) { 
-      HandlePartialProfits(); 
+      HandlePartialProfits();
       if(!PositionSelect(_Symbol)) return;
    }
    
    ulong ticket = PositionGetInteger(POSITION_TICKET);
-   if(loc.day_of_week==FRIDAY && loc.hour>=FridayCloseHour) { trade.PositionClose(ticket); return; }
+   if(loc.day_of_week==FRIDAY && loc.hour>=FridayCloseHour) { trade.PositionClose(ticket); return;
+   }
 
    ENUM_POSITION_TYPE side = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
    double entry = PositionGetDouble(POSITION_PRICE_OPEN);
@@ -822,7 +1051,8 @@ void ManageOpenPositions(const MqlDateTime &loc, bool overnight)
 
    if(AAI_ApplyBEAndTrail(side, entry, sl))
    {
-      // apply SL only; keep TP unchanged
+      // apply SL only;
+      // keep TP unchanged
       trade.PositionModify(_Symbol, sl, tp);
    }
 }
@@ -839,7 +1069,6 @@ bool AAI_ApplyBEAndTrail(const ENUM_POSITION_TYPE side, const double entry_price
 {
    // Do not manage exits if using fixed RR
    if(InpExit_FixedRR) return false;
-
    const double pip = AAI_Pip();
    const double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    const double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
@@ -847,7 +1076,6 @@ bool AAI_ApplyBEAndTrail(const ENUM_POSITION_TYPE side, const double entry_price
    const double px     = is_long ? bid : ask;
    const double move_p = is_long ? (px - entry_price) : (entry_price - px);
    const double move_pips = move_p / pip;
-
    bool changed=false;
    
    // --- 1) Break-even snap (one-shot tighten; based on partial profit R multiple)
@@ -888,21 +1116,21 @@ bool AAI_ApplyBEAndTrail(const ENUM_POSITION_TYPE side, const double entry_price
 void HandlePartialProfits()
 {
    string comment = PositionGetString(POSITION_COMMENT);
-   if(StringFind(comment, "|P1") != -1) return; // Already took partials
+   if(StringFind(comment, "|P1") != -1) return;
+   // Already took partials
 
    string parts[];
-   if(StringSplit(comment, '|', parts) < 6) return; // AAI|C|R|ZE|SL|TP
+   if(StringSplit(comment, '|', parts) < 6) return;
+   // AAI|C|R|ZE|SL|TP
 
    double sl_price = StringToDouble(parts[4]);
    double open_price = PositionGetDouble(POSITION_PRICE_OPEN);
    if(sl_price == 0) return;
-   
    double initial_risk_pips = MathAbs(open_price - sl_price) / PipSize();
    if(initial_risk_pips <= 0) return;
 
    long type = PositionGetInteger(POSITION_TYPE);
    double current_profit_pips = (type == POSITION_TYPE_BUY) ? (SymbolInfoDouble(symbolName, SYMBOL_BID) - open_price) / PipSize() : (open_price - SymbolInfoDouble(symbolName, SYMBOL_ASK)) / PipSize();
-   
    if(current_profit_pips >= initial_risk_pips * InpPartial_R_multiple)
    {
       ulong ticket = PositionGetInteger(POSITION_TICKET);
@@ -911,7 +1139,6 @@ void HandlePartialProfits()
       double lot_step = SymbolInfoDouble(symbolName, SYMBOL_VOLUME_STEP);
       close_volume = round(close_volume / lot_step) * lot_step;
       if(close_volume < lot_step) return;
-      
       if(trade.PositionClosePartial(ticket, close_volume))
       {
           double be_sl_price = open_price + ((type == POSITION_TYPE_BUY) ? InpBE_Offset_Points * _Point : -InpBE_Offset_Points * _Point);
@@ -1029,7 +1256,8 @@ void JournalClosedPosition(ulong position_id)
       string line = StringFormat("%s;%s;%s;%.2f;%.5f;%.5f;%.5f;%.5f;%.2f;%.1f;%.2f;%d;%d;%.2f;%s\n",
                                  TimeToString(timestamp_close, TIME_DATE|TIME_SECONDS),
                                  symbol, side, lots, entry_price, sl_price, tp_price, exit_price,
-                                 profit, profit_points, rr, conf, reason, ze_strength, bc_mode);
+               
+                                  profit, profit_points, rr, conf, reason, ze_strength, bc_mode);
       FileWriteString(file_handle, line);
       FileFlush(file_handle);
       FileClose(file_handle);
