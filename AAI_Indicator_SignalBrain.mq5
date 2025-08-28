@@ -199,35 +199,22 @@ int OnCalculate(const int rates_total,
                 reasonCode = (signal > 0) ? REASON_BUY_HTF_CONTINUATION : REASON_SELL_HTF_CONTINUATION;
             }
 
-            // --- 3. Confluence: ZoneEngine ---
+// --- 3. Confluence: ZoneEngine ---
             if(UseZoneEngine)
             {
                 if(ZE_handle != INVALID_HANDLE)
                 {
-                    double zeStatus_arr[1], zeStrength_arr[1], zeLiquidity_arr[1];
-                    if(CopyBuffer(ZE_handle, 0, i, 1, zeStatus_arr) > 0 &&
-                       CopyBuffer(ZE_handle, 2, i, 1, zeStrength_arr) > 0 &&
-                       CopyBuffer(ZE_handle, 5, i, 1, zeLiquidity_arr) > 0)
+                    double zeStrength_arr[1];
+                    // 1. We ONLY read Buffer 0 for Strength now.
+                    if(CopyBuffer(ZE_handle, 0, i, 1, zeStrength_arr) > 0)
                     {
-                        double zoneStatus = zeStatus_arr[0];
                         double zoneStrength = zeStrength_arr[0];
-                        double liquidity = zeLiquidity_arr[0];
-
-                        bool isDemandZone = zoneStatus > 0.5;
-                        bool isSupplyZone = zoneStatus < -0.5;
-
-                        // Add confidence if a strong zone aligns with the MA signal
-                        if ((isDemandZone && signal > 0) || (isSupplyZone && signal < 0))
+                        
+                        // 2. Since we only know strength, not direction, we add the bonus
+                        //    if ANY strong zone exists alongside a signal.
+                        if (zoneStrength >= MinZoneStrength)
                         {
-                            if (zoneStrength >= MinZoneStrength)
-                            {
-                                conf += 2.0;
-                                // Update reason code if a liquidity grab is also present
-                                if (liquidity > 0.5)
-                                {
-                                   reasonCode = (signal > 0) ? REASON_BUY_LIQ_GRAB_ALIGNED : REASON_SELL_LIQ_GRAB_ALIGNED;
-                                }
-                            }
+                            conf += 2.0; // Add the base zone bonus
                         }
                     }
                     else
@@ -254,7 +241,7 @@ int OnCalculate(const int rates_total,
                         bool isBearBias = htfBias < -0.5;
 
                         // Add confidence if bias aligns with the MA signal
-                        if ((isBullBias && signal > 0) || (isBearBias < 0))
+if ((isBullBias && signal > 0) || (isBearBias && signal < 0))
                         {
                             conf += 2.0;
                         }
