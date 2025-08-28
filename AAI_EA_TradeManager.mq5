@@ -1,8 +1,8 @@
 //+------------------------------------------------------------------+
 //|                     AAI_EA_TradeManager.mq5                      |
-//|             v3.32 - Fixed Enum Conflicts & Const Modify Error    |
+//|             v3.39 - Fixed Hybrid Approval Flow for Tester        |
 //|                                                                  |
-//|
+//|                                                                  |
 //| (Takes trade signals from AAI_Indicator_SignalBrain)             |
 //|                                                                  |
 //| Copyright 2025, AlfredAI Project                                 |
@@ -46,8 +46,7 @@
 
 // HYBRID toggle + timeout
 input bool InpHybrid_RequireApproval = true;
-input int  InpHybrid_TimeoutSec      = 180;
-
+input int  InpHybrid_TimeoutSec      = 600;
 // Subfolders under MQL5/Files (no trailing backslash)
 string   g_dir_base   = "AlfredAI";
 string   g_dir_intent = "AlfredAI\\intents";
@@ -101,7 +100,6 @@ input int SB_ReadShift = 1;
 // --- SignalBrain Pass-Through Inputs ---
 input group "SignalBrain Pass-Through Inputs"
 input bool SB_PassThrough_SafeTest   = false;
-input bool SB_PassThrough_UseZE      = false;
 input bool SB_PassThrough_UseBC      = true;
 input int  SB_PassThrough_WarmupBars = 150;
 input int  SB_PassThrough_FastMA     = 10;
@@ -161,6 +159,8 @@ input int        InpPullbackBarsMin      = 7;
 input int        InpPullbackBarsMax      = 9;
 // Max bars to wait for pullback
 input int        InpATR_MinPips          = 18;
+// Adding a ATR max input to avoid news 
+input int        InpATR_MaxPips          = 40;       // Maximum ATR value in pips (0=off)
 // Minimum ATR value in pips
 input int        OverextMAPeriod         = 10;
 //--- Confluence Module Inputs (M15 Baseline) ---
@@ -220,8 +220,8 @@ int g_blk_bc = 0;   // BiasCompass misalignment
 int g_blk_over = 0;
 // any over-extension abort
 int g_blk_sess = 0; // session filter block
-int g_blk_spd = 0;
-// spread filter block
+int g_blk_spd = 0;  // spread filter block
+int g_blk_atr = 0;  // ATR volatility filter block
 int g_blk_cool = 0; // cooldown / recent trade block
 int g_blk_bar = 0;
 // same-bar re-entry guard
@@ -255,7 +255,8 @@ string JsonGetStr(const string json, const string key)
    string pat="\""+key+"\":\"";
    int p=StringFind(json, pat); if(p<0) return "";
    p+=StringLen(pat);
-   int q=StringFind(json,"\"",p); if(q<0) return "";
+   int q=StringFind(json,"\"",p);
+   if(q<0) return "";
    return StringSubstr(json, p, q-p);
 }
 
@@ -269,16 +270,28 @@ void AAI_Block(const string reason)
     // Now, convert the copy to lowercase in place
     StringToLower(r);
     // Check the reason using the lowercase copy
-    if(StringFind(r, "overext") == 0 || StringFind(r, "over") == 0) { g_blk_over++; }
-    else if(r == "confidence")         { g_blk_conf++; }
-    else if(r == "ze_gate")            { g_blk_ze++; }
-    else if(r == "bc")                 { g_blk_bc++; }
-    else if(r == "session")            { g_blk_sess++; }
-    else if(r == "spread")             { g_blk_spd++; }
-    else if(r == "cooldown")           { g_blk_cool++; }
-    else if(r == "same_bar")           { g_blk_bar++; }
-    else if(r == "no_trigger")         { g_blk_no++; }
-    else                               { g_blk_no++; } // Catch-all for any other reason
+    if(StringFind(r, "overext") == 0 || StringFind(r, "over") == 0) { g_blk_over++;
+    }
+    else if(r == "confidence")         { g_blk_conf++;
+    }
+    else if(r == "ze_gate")            { g_blk_ze++;
+    }
+    else if(r == "bc")                 { g_blk_bc++;
+    }
+    else if(r == "session")            { g_blk_sess++;
+    }
+    else if(r == "spread")             { g_blk_spd++;
+    }
+    else if(r == "cooldown")           { g_blk_cool++;
+    }
+else if(r == "same_bar")           { g_blk_bar++;
+    }
+    else if(r == "atr")                { g_blk_atr++; // Add this new counter
+    }
+    else if(r == "no_trigger")         { g_blk_no++;
+    }
+    else                               { g_blk_no++;
+    } // Catch-all for any other reason
 
     PrintFormat("%s reason=%s", AAI_BLOCK_LOG, reason);
 }
@@ -369,9 +382,11 @@ string ZE_GateModeToString(ENUM_ZE_GATE_MODE m)
 //+------------------------------------------------------------------+
 inline bool ReadOne(const int handle, const int buf, const int shift, double &out)
 {
-    if(handle == INVALID_HANDLE){ out = 0.0; return false; }
+    if(handle == INVALID_HANDLE){ out = 0.0;
+    return false; }
     double tmp[1];
-    if(CopyBuffer(handle, buf, shift, 1, tmp) == 1){ out = tmp[0]; return true; }
+    if(CopyBuffer(handle, buf, shift, 1, tmp) == 1){ out = tmp[0]; return true;
+    }
     out = 0.0;
     return false;
 }
@@ -487,14 +502,14 @@ int OnInit()
    g_last_entry_bar_buy=0; g_last_entry_bar_sell=0;
    g_cool_until_buy=0; g_cool_until_sell=0;
    
-   bool useZE = (InpZE_Gate != ZE_OFF);
-   bool useBC = (InpBC_AlignMode != BC_OFF);
-   
-   sb_handle = iCustom(_Symbol, SignalTimeframe, "AAI_Indicator_SignalBrain",
-                       SB_PassThrough_SafeTest, useZE, useBC,
+// Correctly derive flags from the EA's gate settings
+bool useZE = (InpZE_Gate != ZE_OFF); 
+bool useBC = (InpBC_AlignMode != BC_OFF);
+
+sb_handle = iCustom(_Symbol, SignalTimeframe, "AAI_Indicator_SignalBrain",
+                       SB_PassThrough_SafeTest, useZE, useBC, // Pass the derived flags
                        SB_PassThrough_WarmupBars, SB_PassThrough_FastMA, SB_PassThrough_SlowMA,
                        SB_PassThrough_MinZoneStrength, SB_PassThrough_EnableDebug);
-                       
    if(useBC) bc_handle = iCustom(_Symbol, SignalTimeframe, "AAI_Indicator_BiasCompass");
 
    g_ze_handle = iCustom(_Symbol, SignalTimeframe, "AAI_Indicator_ZoneEngine");
@@ -521,7 +536,8 @@ int OnInit()
    }
 
    g_hOverextMA = iMA(_Symbol, _Period, OverextMAPeriod, 0, MODE_SMA, PRICE_CLOSE);
-   if(g_hOverextMA == INVALID_HANDLE){ Print("[ERR] Failed to create Overextension MA handle"); return(INIT_FAILED); }
+   if(g_hOverextMA == INVALID_HANDLE){ Print("[ERR] Failed to create Overextension MA handle"); return(INIT_FAILED);
+   }
    
    if(InpHybrid_RequireApproval)
    {
@@ -562,25 +578,29 @@ void OnDeinit(const int reason)
 bool EmitIntent(const string side, double entry, double sl, double tp, double volume,
                 double rr_target, double conf_raw, double conf_eff, double ze_strength)
 {
-   g_pending_id = StringFormat("%s_%s_%I64d", _Symbol, EnumToString(_Period), (long)TimeCurrent());
-   g_pending_ts = TimeCurrent();
-   string fn = g_dir_intent + "\\intent_" + g_pending_id + ".json";
-   string json = StringFormat(
-      "{\"id\":\"%s\",\"symbol\":\"%s\",\"timeframe\":\"%s\",\"side\":\"%s\","
-      "\"entry\":%.5f,\"sl\":%.5f,\"tp\":%.5f,\"volume\":%.2f,"
-      "\"rr_target\":%.2f,\"conf_raw\":%.2f,\"conf_eff\":%.2f,\"ze_strength\":%.2f,"
-      "\"created_ts\":\"%s\"}",
-      g_pending_id, _Symbol, EnumToString(_Period), side,
-      entry, sl, tp, volume,
-      rr_target, conf_raw, conf_eff, ze_strength,
-      TimeToString(TimeCurrent(), TIME_DATE|TIME_MINUTES)
-   );
-   if(WriteText(fn, json)){ PrintFormat("[HYBRID] intent written: %s", fn); return true; }
-   return false;
-   
-   string filesRoot = TerminalInfoString(TERMINAL_DATA_PATH) + "\\MQL5\\Files\\";
-PrintFormat("[HYBRID] intent written at: %s%s", filesRoot, fn);  // fn is your relative intents path
+  g_pending_id = StringFormat("%s_%s_%I64d", _Symbol, EnumToString(_Period), (long)TimeCurrent());
+  g_pending_ts = TimeCurrent();
 
+  string fn_rel = g_dir_intent + "\\intent_" + g_pending_id + ".json";
+  string json = StringFormat(
+    "{\"id\":\"%s\",\"symbol\":\"%s\",\"timeframe\":\"%s\",\"side\":\"%s\","
+    "\"entry\":%.5f,\"sl\":%.5f,\"tp\":%.5f,\"volume\":%.2f,"
+    "\"rr_target\":%.2f,\"conf_raw\":%.2f,\"conf_eff\":%.2f,\"ze_strength\":%.2f,"
+    "\"created_ts\":\"%s\"}",
+    g_pending_id, _Symbol, EnumToString(_Period), side,
+    entry, sl, tp, volume, rr_target, conf_raw, conf_eff, ze_strength,
+    TimeToString(TimeCurrent(), TIME_DATE|TIME_MINUTES)
+  );
+
+  if(WriteText(fn_rel, json))
+  {
+    string root = TerminalInfoString(TERMINAL_DATA_PATH) + "\\MQL5\\Files\\";
+    PrintFormat("[HYBRID] intent written at: %s%s", root, fn_rel);
+    string cmd_rel = g_dir_cmds + "\\cmd_" + g_pending_id + ".json";
+    PrintFormat("[HYBRID] waiting for cmd at: %s%s", root, cmd_rel);
+    return true;
+  }
+  return false;
 }
 
 //+------------------------------------------------------------------+
@@ -591,7 +611,6 @@ void PlaceOrderFromApproval()
     // This function assumes all g_last_* globals have been set by TryOpenPosition
     PrintFormat("[HYBRID] Executing approved trade. Side: %s, Vol: %.2f, Entry: Market, SL: %.5f, TP: %.5f",
                 g_last_side, g_last_vol, g_last_sl, g_last_tp);
-
     trade.SetDeviationInPoints(MaxSlippagePoints);
     bool order_sent = false;
     
@@ -626,53 +645,46 @@ void PlaceOrderFromApproval()
 //+------------------------------------------------------------------+
 void OnTimer()
 {
-   if(!InpHybrid_RequireApproval || g_pending_id=="") return;
+  if(!InpHybrid_RequireApproval || g_pending_id=="") return;
 
-   // timeout guard
-   if((TimeCurrent() - g_pending_ts) > InpHybrid_TimeoutSec){
-      Print("[HYBRID] intent timeout, discarding: ", g_pending_id);
-      g_pending_id = "";
-      return;
-   }
+  // timeout guard
+  if((TimeCurrent() - g_pending_ts) > InpHybrid_TimeoutSec){
+    Print("[HYBRID] intent timeout, discarding: ", g_pending_id);
+    g_pending_id = "";
+    return;
+  }
 
-   // full path base for clarity (prints once per pending ID)
-   static string filesRoot="";
-   if(filesRoot=="")
-      filesRoot = TerminalInfoString(TERMINAL_DATA_PATH) + "\\MQL5\\Files\\";
+  // exact cmd file for the current pending id
+  string cmd_rel = g_dir_cmds + "\\cmd_" + g_pending_id + ".json";
 
-   // look for the EXACT matching command file
-   string cmd_rel  = g_dir_cmds + "\\cmd_" + g_pending_id + ".json";
-   string cmd_full = filesRoot + cmd_rel;
+  // optional breadcrumb to show the exact absolute path
+  static string last_id_printed = "";
+  if(last_id_printed != g_pending_id){
+    string root = TerminalInfoString(TERMINAL_DATA_PATH) + "\\MQL5\\Files\\";
+    PrintFormat("[HYBRID] polling cmd: %s%s", root, cmd_rel);
+    last_id_printed = g_pending_id;
+  }
 
-   // optional breadcrumb (helps confirm folder in the log)
-   // PrintFormat("[HYBRID] checking cmd: %s", cmd_full);
+  if(!FileIsExist(cmd_rel)) return;
 
-   if(!FileIsExist(cmd_rel))  // NOTE: File* APIs use relative path from MQL5/Files
-      return;
+  string s = ReadAll(cmd_rel);
+  if(s==""){ FileDelete(cmd_rel); return; }
 
-   string s = ReadAll(cmd_rel);
-   if(s==""){ FileDelete(cmd_rel); return; }
+  string id     = JsonGetStr(s, "id");
+  string action = JsonGetStr(s, "action"); 
+  StringToLower(action);
 
-   string id     = JsonGetStr(s, "id");
-   string action = JsonGetStr(s, "action");
-   StringToLower(action);
+  if(id != g_pending_id) return; // mismatched/stale
 
-   if(id != g_pending_id){
-      // stale/wrong id; ignore or delete
-      // FileDelete(cmd_rel);
-      return;
-   }
+  if(action=="approve"){
+    Print("[HYBRID] APPROVED: ", id);
+    PlaceOrderFromApproval();
+  } else {
+    Print("[HYBRID] REJECTED: ", id);
+  }
 
-   if(action=="approve"){
-      Print("[HYBRID] APPROVED: ", id);
-      // TODO: call your placement using g_last_* values
-      // PlaceOrderFromApproval();
-   } else {
-      Print("[HYBRID] REJECTED: ", id);
-   }
-
-   FileDelete(cmd_rel);
-   g_pending_id = "";
+  FileDelete(cmd_rel);
+  g_pending_id = "";
 }
 
 
@@ -794,8 +806,10 @@ void CheckForNewTrades()
    // --- Compute Other Gate States ---
    bool sess_ok = IsTradingSession();
    bool spread_ok = (MaxSpreadPoints == 0 || (int)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD) <= MaxSpreadPoints);
-   bool atr_ok = (InpATR_MinPips == 0) ||
-   ((atr_val / pip) >= InpATR_MinPips);
+// --- New ATR Window Logic ---
+bool atr_min_ok = (InpATR_MinPips == 0) || ((atr_val / pip) >= InpATR_MinPips);
+bool atr_max_ok = (InpATR_MaxPips == 0) || ((atr_val / pip) <= InpATR_MaxPips);
+bool atr_ok = atr_min_ok && atr_max_ok;
 
    bool bc_ok = true; // Default to true
    if (InpBC_AlignMode == BC_REQUIRED && SB_PassThrough_UseBC) {
@@ -806,7 +820,7 @@ void CheckForNewTrades()
    }
    bool useZE = (InpZE_Gate != ZE_OFF);
 bool useBC = (InpBC_AlignMode != BC_OFF);
-// when you log, it should say UseZE=F for ZE_OFF
+   // when you log, it should say UseZE=F for ZE_OFF
 // EA→SB args: SafeTest=F UseZE=F UseBC=T Warmup=150
 
    ENUM_OVEREXT_STATE over_state = OK;
@@ -814,7 +828,7 @@ bool useBC = (InpBC_AlignMode != BC_OFF);
    {
       if(!InpOver_SoftWait) // HardBlock Mode
          over_state = (over_p <= InpMaxOverextPips) ?
-OK : BLOCK;
+         OK : BLOCK;
       else // SoftWait Mode
       {
          if(g_ox.armed)
@@ -852,7 +866,7 @@ OK : BLOCK;
    datetime until = (direction > 0) ? g_cool_until_buy : g_cool_until_sell;
    int delta = (int)(until - g_lastBarTime);
    int bars_left = (delta <= 0 || secs <= 0) ?
-0 : ( (delta + secs - 1) / secs );
+   0 : ( (delta + secs - 1) / secs );
    bool cool_ok = (bars_left == 0);
    bool perbar_ok = !PerBarDebounce || ((direction > 0) ? (g_last_entry_bar_buy != g_lastBarTime) : (g_last_entry_bar_sell != g_lastBarTime));
    PrintFormat("[DBG_GATES] %s t=%s sig_prev=%d sig_curr=%d conf=%.0f/%.0f/min=%d over_p=%.1f bc_mode=%s ox_armed=%s ox_wait=%d samebar=%s cool=%s ze_ok=%s ze_strength=%.1f",
@@ -980,14 +994,13 @@ bool TryOpenPosition(int signal, double conf_raw, double conf_eff, int reason_co
    double lots_to_trade = CalculateLotSize((int)conf_eff, MathAbs(entry - sl));
    if(lots_to_trade < MinLotSize) return false;
    string signal_str = (signal == 1) ? "BUY" : "SELL";
-   string comment = StringFormat("AAI|%d|%d|%.2f|%.5f|%.5f",
-                                 (int)conf_eff, reason_code, ze_strength, sl, tp);
-
-   if(ExecutionMode == AutoExecute){
-      // --- HYBRID APPROVAL INTERCEPTION ---
+string comment = StringFormat("AAI|%.1f|%d|%d|%.1f|%.5f|%.5f",
+                                 conf_raw, (int)conf_eff, reason_code, ze_strength, sl, tp);
+                                    if(ExecutionMode == AutoExecute){
+      // --- CAPTURE PARAMS FOR HYBRID/STANDARD PLACEMENT ---
       g_last_side      = signal_str;
       g_last_entry     = entry; 
-      g_last_sl        = sl; 
+      g_last_sl        = sl;
       g_last_tp        = tp; 
       g_last_vol       = lots_to_trade;
       g_last_rr        = InpExit_FixedRR ? InpFixed_RR : InpPartial_R_multiple;
@@ -995,7 +1008,8 @@ bool TryOpenPosition(int signal, double conf_raw, double conf_eff, int reason_co
       g_last_conf_eff  = conf_eff;
       g_last_ze        = ze_strength;
       g_last_comment   = comment;
-
+      
+      // --- HYBRID APPROVAL INTERCEPTION ---
       if(InpHybrid_RequireApproval)
       {
          if(EmitIntent(g_last_side, g_last_entry, g_last_sl, g_last_tp, g_last_vol,
@@ -1009,7 +1023,8 @@ bool TryOpenPosition(int signal, double conf_raw, double conf_eff, int reason_co
       g_last_send_sig_hash = sig_h;
       g_last_send_ms = now_ms;
       trade.SetDeviationInPoints(MaxSlippagePoints);
-      bool order_sent = (signal > 0) ? trade.Buy(lots_to_trade, symbolName, entry, sl, tp, comment) : trade.Sell(lots_to_trade, symbolName, entry, sl, tp, comment);
+      bool order_sent = (signal > 0) ?
+      trade.Buy(lots_to_trade, symbolName, 0, sl, tp, comment) : trade.Sell(lots_to_trade, symbolName, 0, sl, tp, comment);
       
       if(order_sent && (trade.ResultRetcode() == TRADE_RETCODE_DONE || trade.ResultRetcode() == TRADE_RETCODE_DONE_PARTIAL)){
          PrintFormat("%s Signal:%s → Executed %.2f lots @%.5f | SL:%.5f TP:%.5f", EVT_ENTRY, signal_str, trade.ResultVolume(), trade.ResultPrice(), sl, tp);
@@ -1182,84 +1197,93 @@ void JournalClosedPosition(ulong position_id)
 {
    if(!HistorySelectByPosition(position_id)) return;
 
+   // --- Initialize all data fields ---
    datetime timestamp_close = 0;
-   string   symbol = "";
-   string   side = "";
-   double   lots = 0;
-   double   entry_price = 0;
-   double   sl_price = 0;
-   double   tp_price = 0;
-   double   exit_price = 0;
-   double   profit = 0;
-   int      conf = 0;
-   int      reason = 0;
-   double   ze_strength = 0;
-   string   bc_mode = EnumToString(InpBC_AlignMode);
+   string   symbol          = "";
+   string   side            = "";
+   double   lots            = 0;
+   double   entry_price     = 0;
+   double   sl_price        = 0;
+   double   tp_price        = 0;
+   double   exit_price      = 0;
+   double   profit          = 0;
+   double   conf_raw        = 0;
+   int      conf_eff        = 0;
+   int      reason_code     = 0;
+   double   ze_strength     = 0;
+   string   bc_mode         = EnumToString(InpBC_AlignMode);
    
+   // --- Aggregate data from all deals associated with the position ---
    for(int i=0; i<HistoryDealsTotal(); i++)
    {
       ulong deal_ticket = HistoryDealGetTicket(i);
       profit += HistoryDealGetDouble(deal_ticket, DEAL_PROFIT) + HistoryDealGetDouble(deal_ticket, DEAL_COMMISSION) + HistoryDealGetDouble(deal_ticket, DEAL_SWAP);
+      
       if(HistoryDealGetInteger(deal_ticket, DEAL_ENTRY) == DEAL_ENTRY_IN)
       {
-         if(entry_price == 0)
+         // --- Capture details from the first entry deal ---
+         if(entry_price == 0) 
          {
-            symbol = HistoryDealGetString(deal_ticket, DEAL_SYMBOL);
-            side = (HistoryDealGetInteger(deal_ticket, DEAL_TYPE) == DEAL_TYPE_BUY) ? "BUY" : "SELL";
+            symbol      = HistoryDealGetString(deal_ticket, DEAL_SYMBOL);
+            side        = (HistoryDealGetInteger(deal_ticket, DEAL_TYPE) == DEAL_TYPE_BUY) ? "BUY" : "SELL";
             entry_price = HistoryDealGetDouble(deal_ticket, DEAL_PRICE);
 
+            // --- Parse our custom comment string for strategy context ---
             string comment = HistoryDealGetString(deal_ticket, DEAL_COMMENT);
             string parts[];
-            if(StringSplit(comment, '|', parts) >= 6)
+            if(StringSplit(comment, '|', parts) >= 7) // AAI|conf_raw|conf_eff|reason|ze|sl|tp
             {
-               conf = (int)StringToInteger(parts[1]);
-               reason = (int)StringToInteger(parts[2]);
-               ze_strength = StringToDouble(parts[3]);
-               sl_price = StringToDouble(parts[4]);
-               tp_price = StringToDouble(parts[5]);
+               conf_raw    = StringToDouble(parts[1]);
+               conf_eff    = (int)StringToInteger(parts[2]);
+               reason_code = (int)StringToInteger(parts[3]);
+               ze_strength = StringToDouble(parts[4]);
+               sl_price    = StringToDouble(parts[5]);
+               tp_price    = StringToDouble(parts[6]);
             }
          }
          lots += HistoryDealGetDouble(deal_ticket, DEAL_VOLUME);
       }
-      else
+      else // DEAL_ENTRY_OUT
       {
          timestamp_close = (datetime)HistoryDealGetInteger(deal_ticket, DEAL_TIME);
-         exit_price = HistoryDealGetDouble(deal_ticket, DEAL_PRICE);
+         exit_price      = HistoryDealGetDouble(deal_ticket, DEAL_PRICE);
       }
    }
 
-   if(symbol == "") return;
+   if(symbol == "") return; // Skip if we couldn't get trade details
 
-   double profit_points = 0;
-   if(lots > 0)
+   // --- Calculate derived metrics ---
+   double profit_pips = 0;
+   if(point > 0)
    {
-       profit_points = (exit_price - entry_price) * (side == "BUY" ? 1 : -1) / point;
+       profit_pips = (exit_price - entry_price) * (side == "BUY" ? 1 : -1) / point;
    }
 
-   double rr = 0;
+double rr = 0;
    double risk_dist = MathAbs(entry_price - sl_price);
    if(risk_dist > 0)
    {
-      double profit_dist = MathAbs(exit_price - entry_price);
-      rr = profit_dist / risk_dist;
+      // Calculate profit distance WITH direction
+      double profit_dist_signed = (side == "BUY") ? (exit_price - entry_price) : (entry_price - exit_price);
+      rr = profit_dist_signed / risk_dist;
    }
-
+   
+   // --- Write to the CSV file ---
    int file_handle = FileOpen(JournalFileName, FILE_READ|FILE_WRITE|FILE_CSV|(JournalUseCommonFiles ? FILE_COMMON : 0), ';');
    if(file_handle != INVALID_HANDLE)
    {
-      if(FileSize(file_handle) == 0)
+      if(FileSize(file_handle) == 0) // Write header if file is new
       {
-         FileWriteString(file_handle, "timestamp_close;symbol;side;lots;entry;sl;tp;exit;profit;profit_points;rr;conf;reason;ze_strength;bc_mode\n");
+         FileWriteString(file_handle, "timestamp_close;symbol;side;lots;entry;sl;tp;exit;profit;profit_pips;rr;conf_raw;conf_eff;reason_code;ze_strength;bc_mode\n");
       }
       FileSeek(file_handle, 0, SEEK_END);
 
-      string line = StringFormat("%s;%s;%s;%.2f;%.5f;%.5f;%.5f;%.5f;%.2f;%.1f;%.2f;%d;%d;%.2f;%s\n",
+      string line = StringFormat("%s;%s;%s;%.2f;%.5f;%.5f;%.5f;%.5f;%.2f;%.1f;%.2f;%.1f;%d;%d;%.1f;%s\n",
                                  TimeToString(timestamp_close, TIME_DATE|TIME_SECONDS),
                                  symbol, side, lots, entry_price, sl_price, tp_price, exit_price,
-               
-                                  profit, profit_points, rr, conf, reason, ze_strength, bc_mode);
+                                 profit, profit_pips, rr, conf_raw, conf_eff, reason_code, ze_strength, bc_mode);
+      
       FileWriteString(file_handle, line);
-      FileFlush(file_handle);
       FileClose(file_handle);
    }
    else
