@@ -86,7 +86,7 @@ string ZE_GateToStr(int gate)
 #endif
 
 // HYBRID toggle + timeout
-input bool InpHybrid_RequireApproval = true;
+input bool InpHybrid_RequireApproval = false;
 input int  InpHybrid_TimeoutSec      = 600;
 // Subfolders under MQL5/Files (no trailing backslash)
 string   g_dir_base   = "AlfredAI";
@@ -167,7 +167,7 @@ input bool     EnableLogging        = true;
 #ifndef AAI_SESSION_INPUTS_DEFINED
 #define AAI_SESSION_INPUTS_DEFINED
 input bool SessionEnable = true;
-input int  SessionStartHourServer = 9;   // server time
+input int  SessionStartHourServer = 8;   // server time
 input int  SessionEndHourServer   = 23;  // server time
 #endif
 
@@ -193,19 +193,19 @@ input int      InpTrail_Stop_Pips     = 10;
 input group "Entry Filters"
 input int        InpMinConfidence        = 10;
 input bool       InpOver_SoftWait        = true;
-input int        InpMaxOverextPips       = 22;
-input int        InpPullbackBarsMin      = 5;
-input int        InpPullbackBarsMax      = 8;
-input int        InpATR_MinPips          = 18;
-input int        InpATR_MaxPips          = 40;
-input int        OverextMAPeriod         = 12;
+input int        InpMaxOverextPips       = 26;
+input int        InpPullbackBarsMin      = 4;
+input int        InpPullbackBarsMax      = 7;
+input int        InpATR_MinPips          = 8;
+input int        InpATR_MaxPips          = 50;
+input int        OverextMAPeriod         = 10;
 
 //--- Over-extension ATR Normalization (idempotent) ---
 #ifndef AAI_OVER_INPUTS_DEFINED
 #define AAI_OVER_INPUTS_DEFINED
 input bool   OverextUseATR          = true;
 input int    OverextATRPeriod       = 14;   // reuse if you already have ATR handle
-input double OverextATR_Threshold   = 1.20; // dist/ATR in pips
+input double OverextATR_Threshold   = 1.40; // dist/ATR in pips
 #endif
 
 //--- Confluence Module Inputs (M15 Baseline) ---
@@ -213,8 +213,8 @@ input group "Confluence Modules"
 input ENUM_BC_ALIGN_MODE InpBC_AlignMode   = BC_PREFERRED;
 input ENUM_ZE_GATE_MODE  InpZE_Gate        = ZE_PREFERRED;
 input int        InpZE_MinStrength       = 4;
-input int        InpZE_PrefBonus         = 2;
-input int        InpZE_BufferIndexStrength = 0; // -1 for auto-detect
+input int        InpZE_PrefBonus         = 3;
+input int        InpZE_BufferIndexStrength = -1; // -1 for auto-detect
 input int        InpZE_ReadShift         = 1;
 input bool       ZE_TelemetryEnabled     = true;
 
@@ -237,7 +237,8 @@ int g_ze_buf_eff = 0;   // effective ZE buffer we read (auto or manual)
 int g_smc_handle = INVALID_HANDLE;
 enum SMCMode { SMC_OFF=0, SMC_PREFERRED=1, SMC_REQUIRED=2 };
 input SMCMode InpSMC_Mode = SMC_PREFERRED;
-input int     InpSMC_MinConfidence = 7;
+input int     InpSMC_MinConfidence = 9;
+input int     SMC_PREFERRED_BONUS = 1;
 input bool    InpSMC_EnableDebug   = true;
 // Pass-through to AAI_Indicator_SMC
 input bool    SMC_UseFVG       = true;
@@ -902,7 +903,7 @@ void CheckForNewTrades()
       else if(InpSMC_Mode == SMC_PREFERRED)
       {
          if(smc_align && smc_conf >= InpSMC_MinConfidence)
-            conf_eff += 1.0;
+            conf_eff += SMC_PREFERRED_BONUS;
       }
    }
    
