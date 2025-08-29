@@ -85,8 +85,9 @@ string ZE_GateToStr(int gate)
 }
 #endif
 
+
 // HYBRID toggle + timeout
-input bool InpHybrid_RequireApproval = false;
+input bool InpHybrid_RequireApproval = true;
 input int  InpHybrid_TimeoutSec      = 600;
 // Subfolders under MQL5/Files (no trailing backslash)
 string   g_dir_base   = "AlfredAI";
@@ -167,8 +168,22 @@ input bool     EnableLogging        = true;
 #ifndef AAI_SESSION_INPUTS_DEFINED
 #define AAI_SESSION_INPUTS_DEFINED
 input bool SessionEnable = true;
-input int  SessionStartHourServer = 8;   // server time
+input int  SessionStartHourServer = 9;   // server time
 input int  SessionEndHourServer   = 23;  // server time
+#endif
+
+#ifndef AAI_HYBRID_INPUTS_DEFINED
+#define AAI_HYBRID_INPUTS_DEFINED
+// Auto-trading window (server time). Outside -> alerts only.
+input string AutoHourRanges = "8-14,19-23";    // comma-separated hour ranges
+// Day mask for auto-trading (server time): Sun=0..Sat=6
+input bool AutoSun=false, AutoMon=true, AutoTue=true, AutoWed=false, AutoThu=true, AutoFri=true, AutoSat=false;
+
+// Alert channels + throttle
+input bool  HybridAlertPopup       = true;
+input bool  HybridAlertPush        = true;     // requires terminal Push enabled
+input bool  HybridAlertWriteIntent = true;     // write intent file under g_dir_intent
+input int   HybridAlertThrottleSec = 60;       // min seconds between alerts for the same bar
 #endif
 
 //--- Adaptive Spread Inputs (idempotent) ---
@@ -178,7 +193,16 @@ input int MaxSpreadPoints            = 30; // hard cap
 input int SpreadMedianWindowTicks    = 120;
 input int SpreadHeadroomPoints       = 5;  // allow median + headroom
 #endif
-
+////////////// 
+#ifndef AAI_STR_TRIM_DEFINED
+#define AAI_STR_TRIM_DEFINED
+void AAI_Trim(string &s)
+{
+   StringTrimLeft(s);
+   StringTrimRight(s);
+}
+#endif
+//////////
 //--- Exit Strategy Inputs (M15 Baseline) ---
 input group "Exit Strategy"
 input bool     InpExit_FixedRR        = true;
@@ -193,19 +217,19 @@ input int      InpTrail_Stop_Pips     = 10;
 input group "Entry Filters"
 input int        InpMinConfidence        = 10;
 input bool       InpOver_SoftWait        = true;
-input int        InpMaxOverextPips       = 26;
-input int        InpPullbackBarsMin      = 4;
-input int        InpPullbackBarsMax      = 7;
-input int        InpATR_MinPips          = 8;
-input int        InpATR_MaxPips          = 50;
-input int        OverextMAPeriod         = 10;
+input int        InpMaxOverextPips       = 22;
+input int        InpPullbackBarsMin      = 5;
+input int        InpPullbackBarsMax      = 8;
+input int        InpATR_MinPips          = 18;
+input int        InpATR_MaxPips          = 40;
+input int        OverextMAPeriod         = 12;
 
 //--- Over-extension ATR Normalization (idempotent) ---
 #ifndef AAI_OVER_INPUTS_DEFINED
 #define AAI_OVER_INPUTS_DEFINED
 input bool   OverextUseATR          = true;
 input int    OverextATRPeriod       = 14;   // reuse if you already have ATR handle
-input double OverextATR_Threshold   = 1.40; // dist/ATR in pips
+input double OverextATR_Threshold   = 1.20; // dist/ATR in pips
 #endif
 
 //--- Confluence Module Inputs (M15 Baseline) ---
@@ -214,7 +238,7 @@ input ENUM_BC_ALIGN_MODE InpBC_AlignMode   = BC_PREFERRED;
 input ENUM_ZE_GATE_MODE  InpZE_Gate        = ZE_PREFERRED;
 input int        InpZE_MinStrength       = 4;
 input int        InpZE_PrefBonus         = 3;
-input int        InpZE_BufferIndexStrength = -1; // -1 for auto-detect
+input int        InpZE_BufferIndexStrength = 0; // -1 for auto-detect
 input int        InpZE_ReadShift         = 1;
 input bool       ZE_TelemetryEnabled     = true;
 
@@ -237,7 +261,7 @@ int g_ze_buf_eff = 0;   // effective ZE buffer we read (auto or manual)
 int g_smc_handle = INVALID_HANDLE;
 enum SMCMode { SMC_OFF=0, SMC_PREFERRED=1, SMC_REQUIRED=2 };
 input SMCMode InpSMC_Mode = SMC_PREFERRED;
-input int     InpSMC_MinConfidence = 9;
+input int     InpSMC_MinConfidence = 7;
 input int     SMC_PREFERRED_BONUS = 1;
 input bool    InpSMC_EnableDebug   = true;
 // Pass-through to AAI_Indicator_SMC
@@ -311,6 +335,15 @@ datetime g_stamp_bar   = 0;
 datetime g_stamp_smc   = 0;
 datetime g_stamp_none  = 0;
 
+#ifndef AAI_HYBRID_STATE_DEFINED
+#define AAI_HYBRID_STATE_DEFINED
+bool g_auto_hour_mask[24];
+datetime g_hyb_last_alert_bar = 0;
+datetime g_hyb_last_alert_ts  = 0;
+int g_blk_hyb = 0;            // count "alert-only" bars
+datetime g_stamp_hyb = 0;     // once-per-bar stamp
+#endif
+
 bool g_test_summary_printed = false;
 
 
@@ -344,6 +377,65 @@ string JsonGetStr(const string json, const string key)
    if(q<0) return "";
    return StringSubstr(json, p, q-p);
 }
+
+#ifndef AAI_HYBRID_UTILS_DEFINED
+#define AAI_HYBRID_UTILS_DEFINED
+void AAI_ParseHourRanges(const string ranges, bool &mask[])
+{
+   ArrayInitialize(mask,false);
+   string parts[]; int n=StringSplit(ranges, ',', parts);
+   for(int i=0;i<n;i++){
+      string p = parts[i];
+AAI_Trim(p);
+if(StringLen(p)==0) continue;
+      int dash=StringFind(p,"-");
+      if(dash<0){ int h=(int)StringToInteger(p)%24; if(h>=0) mask[h]=true; continue; }
+      int a=(int)StringToInteger(StringSubstr(p,0,dash));
+      int b=(int)StringToInteger(StringSubstr(p,dash+1));
+      a=(a%24+24)%24; b=(b%24+24)%24;
+      if(a<=b){ for(int h=a;h<=b;h++) mask[h]=true; }
+      else    { for(int h=a;h<24;h++) mask[h]=true; for(int h=0;h<=b;h++) mask[h]=true; }
+   }
+}
+bool AAI_HourDayAutoOK()
+{
+   MqlDateTime dt; TimeToStruct(TimeTradeServer(), dt);
+   bool day_ok = ( (dt.day_of_week==0 && AutoSun) || (dt.day_of_week==1 && AutoMon) || (dt.day_of_week==2 && AutoTue) ||
+                   (dt.day_of_week==3 && AutoWed) || (dt.day_of_week==4 && AutoThu) || (dt.day_of_week==5 && AutoFri) ||
+                   (dt.day_of_week==6 && AutoSat) );
+   bool hour_ok = g_auto_hour_mask[dt.hour];
+   return (day_ok && hour_ok);
+}
+void AAI_RaiseHybridAlert(const string side, const double conf_eff, const double ze_strength,
+                          const double smc_conf, const int spread_pts,
+                          const double atr_pips, const double entry, const double sl, const double tp)
+{
+   // once-per-bar throttle
+   if(g_lastBarTime==g_hyb_last_alert_bar)
+   {
+      if((TimeCurrent() - g_hyb_last_alert_ts) < HybridAlertThrottleSec) return;
+   }
+   g_hyb_last_alert_bar = g_lastBarTime;
+   g_hyb_last_alert_ts  = TimeCurrent();
+
+   string msg = StringFormat("[HYBRID_ALERT] %s %s conf=%.1f ZE=%.1f SMC=%.1f spr=%d atr=%.1fp @%.5f SL=%.5f TP=%.5f",
+                              _Symbol, side, conf_eff, ze_strength, smc_conf, spread_pts, atr_pips, entry, sl, tp);
+   if(HybridAlertPopup) Alert(msg);
+   if(HybridAlertPush)  SendNotification(msg);
+
+   if(HybridAlertWriteIntent)
+   {
+      // write a simple intent file for your existing hybrid workflow
+      string fn = StringFormat("%s\\%s_%s_%I64d.txt", g_dir_intent, _Symbol, side, (long)g_lastBarTime);
+      int h = FileOpen(fn, FILE_WRITE|FILE_TXT|FILE_ANSI);
+      if(h!=INVALID_HANDLE){
+         FileWrite(h, msg);
+         FileClose(h);
+      }
+   }
+}
+#endif
+
 
 //+------------------------------------------------------------------+
 //| Centralized block counting and logging                           |
@@ -393,6 +485,10 @@ void AAI_Block(const string reason)
    else if(r == "smc")
    {
       if(g_stamp_smc != g_lastBarTime){ ++g_blk_smc; g_stamp_smc = g_lastBarTime; }
+   }
+   else if(r == "hybrid")
+   {
+      if(g_stamp_hyb != g_lastBarTime){ ++g_blk_hyb; g_stamp_hyb = g_lastBarTime; }
    }
    else
    {
@@ -509,15 +605,15 @@ void AAI_ResetBlockCounters()
 {
     g_blk_conf = 0; g_blk_ze = 0; g_blk_bc = 0; g_blk_over = 0; g_blk_sess = 0;
     g_blk_spd = 0; g_blk_cool = 0; g_blk_bar = 0; g_blk_no = 0; g_blk_atr = 0;
-    g_blk_smc = 0;
+    g_blk_smc = 0; g_blk_hyb = 0;
 }
 
 void AAI_PrintTestSummaryOnce()
 {
     if(g_test_summary_printed) return;
     g_test_summary_printed = true;
-    PrintFormat("[TEST_SUMMARY] conf=%d ze=%d bc=%d over=%d sess=%d spd=%d cool=%d bar=%d smc=%d none=%d",
-                g_blk_conf,g_blk_ze,g_blk_bc,g_blk_over,g_blk_sess,g_blk_spd,g_blk_cool,g_blk_bar,g_blk_smc,g_blk_no);
+    PrintFormat("[TEST_SUMMARY] conf=%d ze=%d bc=%d over=%d sess=%d spd=%d cool=%d bar=%d smc=%d hyb=%d none=%d",
+                g_blk_conf,g_blk_ze,g_blk_bc,g_blk_over,g_blk_sess,g_blk_spd,g_blk_cool,g_blk_bar,g_blk_smc,g_blk_hyb,g_blk_no);
 }
 
 //+------------------------------------------------------------------+
@@ -584,6 +680,14 @@ int OnInit()
       Print("[HYBRID] Approval mode active. Timer set to 2 seconds.");
       EventSetTimer(2);
    }
+
+   AAI_ParseHourRanges(AutoHourRanges, g_auto_hour_mask);
+if(EnableLogging){
+   string hrs=""; int cnt=0;
+   for(int h=0;h<24;++h){ if(g_auto_hour_mask[h]){ ++cnt; hrs += IntegerToString(h) + " "; } }
+   PrintFormat("[HYBRID_INIT] AutoHourRanges='%s' hours_on=%d [%s]", AutoHourRanges, cnt, hrs);
+}
+
 
    return(INIT_SUCCEEDED);
 }
@@ -1090,6 +1194,26 @@ bool TryOpenPosition(int signal, double conf_raw, double conf_eff, int reason_co
    string comment = StringFormat("AAI|%.1f|%d|%d|%.1f|%.5f|%.5f",
                                  conf_raw, (int)conf_eff, reason_code, ze_strength, sl, tp);
                                  
+   // --- HYBRID HOURS SWITCH ---
+   bool auto_ok = AAI_HourDayAutoOK();
+   if(!auto_ok)
+   {
+      // Gather a few stats for the alert
+      double smc_conf=0.0; if(g_smc_handle!=INVALID_HANDLE) AAI_ReadOne(g_smc_handle, 1, SB_ReadShift, smc_conf);
+   
+      int spread_pts = (int)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
+   
+      double atr_val[1]; double atr_pips=0.0;
+      if(CopyBuffer(g_hATR,0,SB_ReadShift,1,atr_val)==1) atr_pips = atr_val[0]/_Point/10.0;
+   
+      AAI_RaiseHybridAlert(signal_str, conf_eff, ze_strength, smc_conf, spread_pts, atr_pips, entry, sl, tp);
+   
+      // Do NOT send order outside the auto window
+      AAI_Block("hybrid");  // new reason; counted once per bar
+      return false;
+   }
+   // --- END HYBRID HOURS SWITCH ---
+   
    if(ExecutionMode == AutoExecute){
       g_last_side      = signal_str;
       g_last_entry     = entry; 
