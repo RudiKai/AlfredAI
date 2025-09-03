@@ -1,88 +1,57 @@
 //+------------------------------------------------------------------+
 //|                  AAI_Indicator_BiasCompass.mq5                   |
-//|              v2.2 - Non-blocking & Headless Refactor             |
+//|                    v3.0 - iMA Handle Refactor                    |
 //|        (Determines multi-timeframe directional bias)             |
 //|                                                                  |
 //| Copyright 2025, AlfredAI Project                    |
 //+------------------------------------------------------------------+
 #property indicator_chart_window
 #property strict
-#property version "2.2"
+#property version "3.0"
 
-// === BEGIN Spec: Headless + single set of properties ===
-#property indicator_plots   0
-#property indicator_buffers 4
-// === END Spec ===
+// --- Headless, single-buffer output ---
+#property indicator_plots   1
+#property indicator_buffers 1
+#property indicator_type1   DRAW_NONE
+#property indicator_label1  "Bias"
+double BiasBuffer[];
 
-// === BEGIN Spec: Buffer declarations ===
-#property indicator_label1 "HTF_Bias"
-#property indicator_label2 "LTF_Bias"
-#property indicator_label3 "HTF_Conf"
-#property indicator_label4 "LTF_Conf"
+//--- Indicator Inputs ---
+input int    BC_FastMA     = 10;
+input int    BC_SlowMA     = 30;
+input ENUM_MA_METHOD BC_MAMethod   = MODE_SMA;
+input ENUM_APPLIED_PRICE BC_Price  = PRICE_CLOSE;
+input int    BC_WarmupBars = 150;
+input bool   EnableDebugLogging = true;
 
-double BC_HTF_Bias[];
-double BC_LTF_Bias[];
-double BC_HTF_Conf[];
-double BC_LTF_Conf[];
-// === END Spec ===
+// --- Indicator Handles ---
+int g_fastMA_handle = INVALID_HANDLE;
+int g_slowMA_handle = INVALID_HANDLE;
 
-// === BEGIN Spec: SafeTest switch and constants ===
-input bool BC_SafeTest = false; // If true, bypasses complex logic for performance testing
-static const int BC_WARMUP = 100; // Bars needed for MA calculations to stabilize
-// === END Spec ===
+// --- Globals ---
+static datetime g_last_log_time = 0;
 
-// --- Constants for Analysis ---
-const ENUM_TIMEFRAMES HTF_TF = PERIOD_H4;
-const ENUM_TIMEFRAMES LTF_TF = PERIOD_M15;
-const int MA_Period_HTF = 21;
-const int MA_Period_LTF = 13;
-
-//+------------------------------------------------------------------+
-//| SafeFill: Bypasses logic for performance testing                 |
-//+------------------------------------------------------------------+
-void BC_SafeFill(const int rates_total, const int prev_calculated)
-{
-    int start = (prev_calculated > 0 ? prev_calculated - 1 : MathMin(BC_WARMUP, rates_total - 1));
-    if(start < 0) start = 0;
-    
-    for(int i = start; i < rates_total; ++i)
-    {
-        // Simple oscillating pattern for testing buffer output
-        double htfBias = ((i % 32) < 16) ? 1.0 : -1.0;
-        double ltfBias = ((i % 8) < 4) ? 1.0 : -1.0;
-        BC_HTF_Bias[i] = htfBias;
-        BC_LTF_Bias[i] = ltfBias;
-        BC_HTF_Conf[i] = 10.0;
-        BC_LTF_Conf[i] = 10.0;
-    }
-}
 
 //+------------------------------------------------------------------+
 //| Initialization                                                   |
 //+------------------------------------------------------------------+
 int OnInit()
 {
-    // === BEGIN Spec: Bind and configure buffers ===
-    bool ok = true;
-    ok &= SetIndexBuffer(0, BC_HTF_Bias, INDICATOR_DATA);
-    ok &= SetIndexBuffer(1, BC_LTF_Bias, INDICATOR_DATA);
-    ok &= SetIndexBuffer(2, BC_HTF_Conf, INDICATOR_DATA);
-    ok &= SetIndexBuffer(3, BC_LTF_Conf, INDICATOR_DATA);
+    // --- Bind the output buffer ---
+    SetIndexBuffer(0, BiasBuffer, INDICATOR_DATA);
+    ArraySetAsSeries(BiasBuffer, true);
+    PlotIndexSetDouble(0, PLOT_EMPTY_VALUE, 0.0);
 
-    if(!ok)
+    // --- Create MA handles using native iMA ---
+    g_fastMA_handle = iMA(_Symbol, _Period, BC_FastMA, 0, BC_MAMethod, BC_Price);
+    g_slowMA_handle = iMA(_Symbol, _Period, BC_SlowMA, 0, BC_MAMethod, BC_Price);
+    
+    // --- Validate handles ---
+    if(g_fastMA_handle < 0 || g_slowMA_handle < 0)
     {
-        Print("BiasCompass: SetIndexBuffer failed");
+        Print("[INIT_ERROR] BiasCompass iMA handle failed");
         return(INIT_FAILED);
     }
-
-    ArraySetAsSeries(BC_HTF_Bias, true);
-    ArraySetAsSeries(BC_LTF_Bias, true);
-    ArraySetAsSeries(BC_HTF_Conf, true);
-    ArraySetAsSeries(BC_LTF_Conf, true);
-
-    // NOTE: 'SetIndexEmptyValue' is not a valid MQL5 function.
-    // The OnCalculate loop explicitly writes 0.0 to fulfill this requirement.
-    // === END Spec ===
 
     return(INIT_SUCCEEDED);
 }
@@ -92,11 +61,13 @@ int OnInit()
 //+------------------------------------------------------------------+
 void OnDeinit(const int reason)
 {
-    // No objects to clean up in headless mode
+    // --- Release indicator handles ---
+    if(g_fastMA_handle != INVALID_HANDLE) IndicatorRelease(g_fastMA_handle);
+    if(g_slowMA_handle != INVALID_HANDLE) IndicatorRelease(g_slowMA_handle);
 }
 
 //+------------------------------------------------------------------+
-//| Main calculation loop (non-blocking, incremental)                |
+//| Main calculation loop (closed-bar semantics)                     |
 //+------------------------------------------------------------------+
 int OnCalculate(const int rates_total,
                 const int prev_calculated,
@@ -109,58 +80,57 @@ int OnCalculate(const int rates_total,
                 const long &volume[],
                 const int &spread[])
 {
-    // === BEGIN Spec: SafeTest switch ===
-    if(BC_SafeTest)
+    // --- Warmup Guard ---
+    if(rates_total < BC_WarmupBars)
     {
-        BC_SafeFill(rates_total, prev_calculated);
-        return(rates_total);
+        for(int i = 0; i < rates_total; i++) BiasBuffer[i] = 0;
+        return(0);
     }
-    // === END Spec ===
 
-    // === BEGIN Spec: Canonical non-blocking, incremental loop ===
-    if(rates_total <= 0) return(0);
-
-    int start = (prev_calculated > 0 ? prev_calculated - 1 : MathMin(BC_WARMUP, rates_total - 1));
-    if(start < 0) start = 0;
-    if(start >= rates_total) start = rates_total - 1;
-
-    for(int i = start; i < rates_total; ++i)
+    // --- Determine start bar for calculation ---
+    int start_bar = rates_total - 2;
+    if(prev_calculated > 0)
     {
-        // --- Initialize local variables for this bar ---
-        double htf_bias = 0.0, ltf_bias = 0.0;
-        double htf_conf = 0.0, ltf_conf = 0.0;
+        start_bar = rates_total - prev_calculated;
+    }
+    start_bar = MathMax(1, start_bar);
 
-        // --- HTF Calculation ---
-        int shiftHTF = iBarShift(_Symbol, HTF_TF, time[i], true);
-        if(shiftHTF >= 0)
+    // --- Loop backwards to calculate bias for new bars ---
+    for(int i = start_bar; i >= 1; i--)
+    {
+        // --- Data Availability Guard ---
+        if(BarsCalculated(g_fastMA_handle) <= i || BarsCalculated(g_slowMA_handle) <= i)
         {
-            double hClose = iClose(_Symbol, HTF_TF, shiftHTF);
-            // FIX: Corrected iMA parameter count. The shift is the 4th parameter.
-            double hEMA   = iMA(_Symbol, HTF_TF, MA_Period_HTF, shiftHTF, MODE_EMA, PRICE_CLOSE);
-            if(hClose > hEMA) htf_bias = 1.0;
-            if(hClose < hEMA) htf_bias = -1.0;
-            htf_conf = 10.0; // Assign a base confidence
+            continue; // Not enough data for this bar yet
         }
 
-        // --- LTF Calculation ---
-        int shiftLTF = iBarShift(_Symbol, LTF_TF, time[i], true);
-        if(shiftLTF >= 0)
+        double f[1], s[1];
+        if(CopyBuffer(g_fastMA_handle, 0, i, 1, f) != 1 || CopyBuffer(g_slowMA_handle, 0, i, 1, s) != 1)
         {
-            double lClose = iClose(_Symbol, LTF_TF, shiftLTF);
-            // FIX: Corrected iMA parameter count. The shift is the 4th parameter.
-            double lEMA   = iMA(_Symbol, LTF_TF, MA_Period_LTF, shiftLTF, MODE_EMA, PRICE_CLOSE);
-            if(lClose > lEMA) ltf_bias = 1.0;
-            if(lClose < lEMA) ltf_bias = -1.0;
-            ltf_conf = 10.0; // Assign a base confidence
+           if(EnableDebugLogging && time[i] != g_last_log_time)
+              PrintFormat("[EVT_WARN] BiasCompass CopyBuffer failed on bar %s", TimeToString(time[i]));
+           BiasBuffer[i] = 0; // Publish neutral on failure
+           continue;
         }
 
-        // --- Assign calculated values to buffers ---
-        BC_HTF_Bias[i] = htf_bias;
-        BC_LTF_Bias[i] = ltf_bias;
-        BC_HTF_Conf[i] = htf_conf;
-        BC_LTF_Conf[i] = ltf_conf;
+        // --- Compute and write bias ---
+        double bias = (f[0] > s[0]) ? 1.0 : (f[0] < s[0] ? -1.0 : 0.0);
+        BiasBuffer[i] = bias;
+
+        // --- Log the state of the last fully closed bar (shift=1) ---
+        if(i == 1 && EnableDebugLogging && time[rates_total - 1] != g_last_log_time)
+        {
+            PrintFormat("[DBG_BC] shift=1 fast=%.5f slow=%.5f bias=%d", f[0], s[0], (int)bias);
+            g_last_log_time = time[rates_total - 1];
+        }
     }
+
+    // --- Mirror closed bar value to current (forming) bar for EA access ---
+    if(rates_total > 1)
+    {
+        BiasBuffer[0] = BiasBuffer[1];
+    }
+    
     return(rates_total);
-    // === END Spec ===
 }
 //+------------------------------------------------------------------+
