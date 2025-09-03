@@ -1,14 +1,14 @@
 //+------------------------------------------------------------------+
 //|                  AAI_Indicator_SignalBrain.mq5                   |
-//|               v3.4 - Corrected Headless Buffer Publishing        |
+//|               v3.5 - Closed-Bar Guarantees & Headless Plots      |
 //|                                                                  |
-//|        Acts as the confluence and trade signal engine.         |
+//| Acts as the confluence and trade signal engine.                  |
 //|                                                                  |
 //| Copyright 2025, AlfredAI Project                    |
 //+------------------------------------------------------------------+
 #property strict
 #property indicator_chart_window
-#property version "3.4"
+#property version "3.5"
 
 // --- Indicator Buffers ---
 #property indicator_buffers 4
@@ -29,27 +29,27 @@ double ReasonCodeBuffer[];
 #property indicator_type4   DRAW_NONE
 #property indicator_label4  "ZoneTimeframe"
 double ZoneTFBuffer[];
-//--- Indicator Inputs (Stable Order) ---
+//--- Indicator Inputs (as per spec) ---
 input bool SB_SafeTest        = false;
-input bool UseZoneEngine      = false;
-input bool UseBiasCompass     = false;
-input int  WarmupBars         = 150;
-input int  FastMA             = 10;
-input int  SlowMA             = 30;
-input int  MinZoneStrength    = 4;
+input bool SB_UseZE           = false;
+input bool SB_UseBC           = false;
+input int  SB_WarmupBars      = 150;
+input int  SB_FastMA          = 10;
+input int  SB_SlowMA          = 30;
+input int  SB_MinZoneStrength = 4;
 input bool EnableDebugLogging = true;
 // --- Enums for Clarity
 enum ENUM_REASON_CODE
 {
-    REASON_NONE,
-    REASON_BUY_HTF_CONTINUATION,
-    REASON_SELL_HTF_CONTINUATION,
-    REASON_BUY_LIQ_GRAB_ALIGNED,
-    REASON_SELL_LIQ_GRAB_ALIGNED,
-    REASON_NO_ZONE,
-    REASON_LOW_ZONE_STRENGTH,
-    REASON_BIAS_CONFLICT,
-    REASON_TEST_SCENARIO // Added for SafeTest
+    REASON_NONE,                  // 0
+    REASON_BUY_HTF_CONTINUATION,  // 1
+    REASON_SELL_HTF_CONTINUATION, // 2
+    REASON_BUY_LIQ_GRAB_ALIGNED,  // 3
+    REASON_SELL_LIQ_GRAB_ALIGNED, // 4
+    REASON_NO_ZONE,               // 5
+    REASON_LOW_ZONE_STRENGTH,     // 6
+    REASON_BIAS_CONFLICT,         // 7
+    REASON_TEST_SCENARIO          // 8
 };
 // --- Indicator Handles ---
 int ZE_handle = INVALID_HANDLE;
@@ -84,23 +84,22 @@ int OnInit()
     PlotIndexSetDouble(3, PLOT_EMPTY_VALUE, 0.0);
     IndicatorSetInteger(INDICATOR_DIGITS,0);
     // --- Create dependent indicator handles ---
-    // MA handles are needed for both SafeTest and the new live logic base signal
-    fastMA_handle = iMA(_Symbol, _Period, FastMA, 0, MODE_SMA, PRICE_CLOSE);
-    slowMA_handle = iMA(_Symbol, _Period, SlowMA, 0, MODE_SMA, PRICE_CLOSE);
+    fastMA_handle = iMA(_Symbol, _Period, SB_FastMA, 0, MODE_SMA, PRICE_CLOSE);
+    slowMA_handle = iMA(_Symbol, _Period, SB_SlowMA, 0, MODE_SMA, PRICE_CLOSE);
     if(fastMA_handle == INVALID_HANDLE || slowMA_handle == INVALID_HANDLE)
     {
         Print("[SB_ERR] Failed to create one or more MA handles. Indicator cannot function.");
         return(INIT_FAILED);
     }
 
-    if(UseZoneEngine)
+    if(SB_UseZE)
     {
         ZE_handle = iCustom(_Symbol, _Period, "AAI_Indicator_ZoneEngine");
         if(ZE_handle == INVALID_HANDLE)
             Print("[SB_WARN] Failed to create ZoneEngine handle. It will be ignored.");
     }
 
-    if(UseBiasCompass)
+    if(SB_UseBC)
     {
         BC_handle = iCustom(_Symbol, _Period, "AAI_Indicator_BiasCompass");
         if(BC_handle == INVALID_HANDLE)
@@ -135,8 +134,16 @@ int OnCalculate(const int rates_total,
                 const long &volume[],
                 const int &spread[])
 {
-    if(rates_total < WarmupBars)
+    if(rates_total < SB_WarmupBars)
     {
+        // During warmup, write neutral values to all available bars to prevent stale data
+        for(int i = 0; i < rates_total; i++)
+        {
+            SignalBuffer[i] = 0;
+            ConfidenceBuffer[i] = 0;
+            ReasonCodeBuffer[i] = REASON_NONE;
+            ZoneTFBuffer[i] = 0;
+        }
         return(0);
     }
     
@@ -168,9 +175,8 @@ int OnCalculate(const int rates_total,
 
             if(fast_val > slow_val && fast_val != 0 && slow_val != 0) signal = 1.0;
             else if(fast_val < slow_val && fast_val != 0 && slow_val != 0) signal = -1.0;
-            
             SignalBuffer[i]     = signal;
-            ConfidenceBuffer[i] = (signal != 0.0) ? 10.0 : 0.0;
+            ConfidenceBuffer[i] = (signal != 0.0) ? 100.0 : 0.0;
             ReasonCodeBuffer[i] = (signal != 0.0) ? (double)REASON_TEST_SCENARIO : (double)REASON_NONE;
             ZoneTFBuffer[i]     = (double)PeriodSeconds(_Period);
         }
@@ -195,33 +201,30 @@ int OnCalculate(const int rates_total,
             // --- 2. Base Confidence & Reason ---
             if (signal != 0.0)
             {
-                conf = 10.0;
+                conf = 50.0; // Base confidence for a clean cross is 50/100
                 reasonCode = (signal > 0) ? REASON_BUY_HTF_CONTINUATION : REASON_SELL_HTF_CONTINUATION;
             }
 
-// --- 3. Confluence: ZoneEngine ---
-            if(UseZoneEngine)
+            // --- 3. Confluence: ZoneEngine ---
+            if(SB_UseZE)
             {
                 if(ZE_handle != INVALID_HANDLE)
                 {
                     double zeStrength_arr[1];
-                    // 1. We ONLY read Buffer 0 for Strength now.
+                    // Per contract, ZE strength is on buffer 0
                     if(CopyBuffer(ZE_handle, 0, i, 1, zeStrength_arr) > 0)
                     {
                         double zoneStrength = zeStrength_arr[0];
-                        
-                        // 2. Since we only know strength, not direction, we add the bonus
-                        //    if ANY strong zone exists alongside a signal.
-                        if (zoneStrength >= MinZoneStrength)
+                        if (zoneStrength >= SB_MinZoneStrength)
                         {
-                            conf += 2.0; // Add the base zone bonus
+                            conf += 25.0; // Add ZE bonus
                         }
                     }
                     else
                     {
                          if(time[i] != g_last_ze_fail_log_time)
                          {
-                            PrintFormat("[DBG_ZE] Read failed on bar %s. Treating as neutral.", TimeToString(time[i]));
+                            PrintFormat("[DBG_ZE] read failed on bar %s, treating as neutral.", TimeToString(time[i]));
                             g_last_ze_fail_log_time = time[i];
                          }
                     }
@@ -229,28 +232,28 @@ int OnCalculate(const int rates_total,
             }
 
             // --- 4. Confluence: BiasCompass ---
-            if(UseBiasCompass)
+            if(SB_UseBC)
             {
                 if(BC_handle != INVALID_HANDLE)
                 {
                     double htfBias_arr[1];
+                    // Per contract, HTF bias is on buffer 0
                     if(CopyBuffer(BC_handle, 0, i, 1, htfBias_arr) > 0)
                     {
                         double htfBias = htfBias_arr[0];
                         bool isBullBias = htfBias > 0.5;
                         bool isBearBias = htfBias < -0.5;
-
                         // Add confidence if bias aligns with the MA signal
-if ((isBullBias && signal > 0) || (isBearBias && signal < 0))
+                        if ((isBullBias && signal > 0) || (isBearBias && signal < 0))
                         {
-                            conf += 2.0;
+                            conf += 25.0; // Add BC bonus
                         }
                     }
                     else
                     {
                          if(time[i] != g_last_bc_fail_log_time)
                          {
-                            PrintFormat("[DBG_BC] Read failed on bar %s. Treating as neutral.", TimeToString(time[i]));
+                            PrintFormat("[DBG_BC] read failed on bar %s, treating as neutral.", TimeToString(time[i]));
                             g_last_bc_fail_log_time = time[i];
                          }
                     }
@@ -259,7 +262,7 @@ if ((isBullBias && signal > 0) || (isBearBias && signal < 0))
 
             // --- 5. Finalize and Write Buffers for the closed bar ---
             SignalBuffer[i]     = signal;
-            ConfidenceBuffer[i] = fmin(20.0, conf); // Clamp confidence to [0, 20]
+            ConfidenceBuffer[i] = fmin(100.0, conf); // Clamp confidence to [0, 100]
             ReasonCodeBuffer[i] = (double)reasonCode;
             ZoneTFBuffer[i]     = (double)PeriodSeconds(_Period);
         }
@@ -274,16 +277,14 @@ if ((isBullBias && signal > 0) || (isBearBias && signal < 0))
         ZoneTFBuffer[0]     = ZoneTFBuffer[1];
     }
     
-    // --- Optional Debug Logging ---
+    // --- Optional Debug Logging for the last closed bar ---
     if(EnableDebugLogging && time[rates_total-1] != g_last_log_time)
     {
-        // Log the state of the last fully closed bar (shift=1)
-        PrintFormat("[SB_OUT] t=%s sig=%.1f conf=%.1f reason=%g ztf=%g",
-                    TimeToString(time[rates_total-2]),
-                    SignalBuffer[1],
+        PrintFormat("[DBG_SB] shift=1 sig=%d conf=%.0f reason=%d ztf=%d",
+                    (int)SignalBuffer[1],
                     ConfidenceBuffer[1],
-                    ReasonCodeBuffer[1],
-                    ZoneTFBuffer[1]);
+                    (int)ReasonCodeBuffer[1],
+                    (int)ZoneTFBuffer[1]);
         g_last_log_time = time[rates_total-1];
     }
 
