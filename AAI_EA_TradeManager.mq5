@@ -1557,18 +1557,20 @@ void CheckForNewTrades()
       }
    }
 
-   // --- T008: ZE Gating & Bonus ---
-   bool ze_ok_strength = true; // Assume true if gate is OFF
-   if(ZE_Gate != ZE_OFF)
-   {
-       Read1(g_ze_handle, 0, 1, g_ze_strength, "ZE");
-       ze_ok_strength = (g_ze_strength >= ZE_MinStrength);
-       if(ZE_Gate == ZE_REQUIRED && !ze_ok_strength)
-       {
-           AAI_Block("ZE_REQUIRED");
-           return;
-       }
-   }
+// --- T008: ZE Gating & Bonus ---
+bool ze_ok_strength = true; // Assume true if gate is OFF
+if(ZE_Gate != ZE_OFF)
+{
+    // Read using the effective buffer + configured shift
+    AAI_UpdateZE(); // fills g_ze_strength via g_ze_buf_eff & ZE_ReadShift
+    ze_ok_strength = (g_ze_strength >= ZE_MinStrength);
+    if(ZE_Gate == ZE_REQUIRED && !ze_ok_strength)
+    {
+        AAI_Block("ZE_REQUIRED");
+        return;
+    }
+}
+
    
    double conf_raw = 0.0, conf_eff = 0.0;
    AAI_ComputeConfidence(sbConf, ze_ok_strength, conf_raw, conf_eff);
@@ -1597,7 +1599,7 @@ void CheckForNewTrades()
    if(conf_eff < MinConfidence) { AAI_Block("confidence"); return; }
    
    // --- BC Gate ---
-   if (BC_AlignMode != BC_OFF && SB_PassThrough_UseBC) {
+if (BC_AlignMode != BC_OFF) {
        double htf_bias = 0;
        if (Read1(bc_handle, BC_BUF_HTF_BIAS, readShift, htf_bias, "BC")) {
            bool is_aligned = ((direction > 0 && htf_bias > 0) || (direction < 0 && htf_bias < 0));
