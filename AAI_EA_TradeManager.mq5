@@ -1216,9 +1216,10 @@ void OnTick()
       ManageOpenPositions(dt, false);
    }
 
-   datetime bar_time = iTime(_Symbol, _Period, 0);
-   if(bar_time == 0 || bar_time == g_lastBarTime) return;
-   g_lastBarTime = bar_time;
+datetime bar_time = iTime(_Symbol, (ENUM_TIMEFRAMES)SignalTimeframe, 0);
+if(bar_time == 0 || bar_time == g_lastBarTime) return;
+g_lastBarTime = bar_time;
+
    CheckForNewTrades();
 }
 
@@ -1232,7 +1233,7 @@ void CheckForNewTrades()
    long bars_avail = Bars(_Symbol, (ENUM_TIMEFRAMES)SignalTimeframe);
    if (bars_avail < WarmupBars)
    {
-       datetime barTime = iTime(_Symbol, _Period, 0);
+datetime barTime = iTime(_Symbol, (ENUM_TIMEFRAMES)SignalTimeframe, 0);
        if (g_last_ea_warmup_log_time != barTime)
        {
            PrintFormat("[WARMUP] t=%s sb_handle_ok=%d need=%d have=%d",
@@ -1514,7 +1515,7 @@ bool TryOpenPosition(int signal, double conf_raw_unused, double conf_eff, int re
 
    const int    digs = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
    const double pip_size = PipSize();
-   const double min_stop_dist = (double)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * point;
+const double min_stop_dist = (double)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * _Point;
    
    double atr_val_raw = 0;
 double _tmp_atr_entry_[1];
@@ -1524,16 +1525,14 @@ if (CopyBuffer(g_hATR, 0, 1, 1, _tmp_atr_entry_) == 1) atr_val_raw = _tmp_atr_en
    double entry = (signal > 0) ? t.ask : t.bid;
    double sl = 0, tp = 0;
    double rr = 0.0;
-   if(signal > 0){ 
-      sl = NormalizeDouble(entry - sl_dist, digs);
-      if(Exit_FixedRR) { tp = NormalizeDouble(entry + Fixed_RR * (entry - sl), digs); rr = Fixed_RR; }
-      else tp = 0;
-   }
-   else if(signal < 0){ 
-      sl = NormalizeDouble(entry + sl_dist, digs);
-      if(Exit_FixedRR) { tp = NormalizeDouble(entry - Fixed_RR * (sl - entry), digs); rr = Fixed_RR; }
-      else tp = 0;
-   }
+// Clamp SL distance
+if(signal > 0){ // buy
+   if((entry - sl) < min_stop_dist) sl = NormalizeDouble(entry - min_stop_dist, digs);
+   if(tp > 0 && (tp - entry) < min_stop_dist) tp = NormalizeDouble(entry + min_stop_dist, digs);
+}else if(signal < 0){ // sell
+   if((sl - entry) < min_stop_dist) sl = NormalizeDouble(entry + min_stop_dist, digs);
+   if(tp > 0 && (entry - tp) < min_stop_dist) tp = NormalizeDouble(entry - min_stop_dist, digs);
+}
    
    // --- Duplicate Guard (MS) ---
    ulong now_ms = GetTickCount64();
